@@ -186,8 +186,12 @@ object WebViewChatEngine {
                         request: WebResourceRequest?,
                         error: WebResourceError?
                     ) {
-                        if (request?.isForMainFrame == true && !pageReady) {
-                            LogBuffer.log("WebView 引擎首页加载错误 code=${error?.errorCode}（等待自动重试/超时兜底）")
+                        if (request?.isForMainFrame == true) {
+                            LogBuffer.log("WebView 引擎首页加载错误 code=${error?.errorCode}（重置就绪标志，等待重试/超时兜底）")
+                            Log.i("CGFREE_JS", "page-error code=${error?.errorCode}")
+                            synchronized(lock) {
+                                pageReady = false
+                            }
                         }
                     }
                     override fun onRenderProcessGone(
@@ -512,9 +516,16 @@ object WebViewChatEngine {
             }
             log('ui-start, msg-len=' + '__MSG__'.length);
             var pre = assistantText();
-            var input = findInput();
+            // 等待输入框出现（SPA 渲染延迟/页面重载场景），最多 20s
+            var input = null;
+            for (var wi2 = 0; wi2 < 40; wi2++) {
+              input = findInput();
+              if (input) break;
+              if (wi2 % 6 === 5) log('wait-input ' + ((wi2 + 1) * 500) + 'ms');
+              await new Promise(function(res){ setTimeout(res, 500); });
+            }
             if (!input) {
-              AndroidBridge.onError(0, '页面未找到输入框（chatgpt.com DOM 结构可能变化或未进入可对话状态）');
+              AndroidBridge.onError(0, '页面未找到输入框（等待20s仍无输入框，页面可能加载失败/未完成渲染或登录态失效）');
               return;
             }
             log('input-found: ' + input.tagName + '#' + (input.id || ''));
