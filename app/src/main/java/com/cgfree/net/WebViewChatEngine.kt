@@ -436,25 +436,70 @@ object WebViewChatEngine {
             log('input-found: ' + input.tagName + '#' + (input.id || ''));
             input.focus();
             var isContentEditable = (input.isContentEditable === true) || (input.tagName === 'DIV');
+            var typedOk = false;
             if (isContentEditable) {
-              var sel = window.getSelection();
-              sel.removeAllRanges();
-              var range = document.createRange();
-              range.selectNodeContents(input);
-              sel.addRange(range);
-              document.execCommand('insertText', false, '__MSG__');
-              input.dispatchEvent(new Event('input', { bubbles: true }));
+              try {
+                var sel = window.getSelection();
+                sel.removeAllRanges();
+                var range = document.createRange();
+                range.selectNodeContents(input);
+                sel.addRange(range);
+                typedOk = document.execCommand('insertText', false, '__MSG__');
+                log('execCommand-insertText=' + typedOk);
+              } catch(e) { log('execCommand-ex=' + (e.message || e)); }
+              if (!typedOk) {
+                input.innerHTML = '';
+                input.innerText = '__MSG__';
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+                typedOk = true;
+                log('fallback-innerText');
+              }
             } else {
               setNativeValue(input, '__MSG__');
+              typedOk = true;
             }
-            await new Promise(function(res){ setTimeout(res, 600); });
-            log('input-value-len=' + (input.value ? input.value.length : -1) + ' ce=' + isContentEditable);
-            var btn = findSendBtn();
+            await new Promise(function(res){ setTimeout(res, 1200); });
+            var contentNow = isContentEditable ? (input.innerText || '') : (input.value || '');
+            log('content-len=' + contentNow.length + ' ce=' + isContentEditable);
+            // 若内容没进去，重试一次输入
+            if (typedOk && contentNow.length === 0) {
+              log('retry-input');
+              if (isContentEditable) {
+                try {
+                  var sel2 = window.getSelection();
+                  sel2.removeAllRanges();
+                  var range2 = document.createRange();
+                  range2.selectNodeContents(input);
+                  sel2.addRange(range2);
+                  typedOk = document.execCommand('insertText', false, '__MSG__');
+                  log('retry-execCommand=' + typedOk);
+                } catch(e2) { log('retry-ex=' + (e2.message || e2)); }
+                if (!typedOk) {
+                  input.innerText = '__MSG__';
+                  input.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+              } else {
+                setNativeValue(input, '__MSG__');
+              }
+              await new Promise(function(res){ setTimeout(res, 1000); });
+              contentNow = isContentEditable ? (input.innerText || '') : (input.value || '');
+              log('retry-content-len=' + contentNow.length);
+            }
+            // 等待发送按钮可用（React 异步更新），最多 5s
+            var btn = null;
+            for (var wi = 0; wi < 10; wi++) {
+              btn = findSendBtn();
+              if (btn && !btn.disabled) break;
+              await new Promise(function(res){ setTimeout(res, 500); });
+            }
+            btn = findSendBtn();
             if (btn && !btn.disabled) {
               btn.click();
               log('send-by-click');
             } else {
               log('send-btn=' + (btn ? 'disabled' : 'missing') + ', fallback-enter');
+              input.focus();
               var ev = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true });
               input.dispatchEvent(ev);
               input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
@@ -463,9 +508,15 @@ object WebViewChatEngine {
             var lastText = pre;
             var lastChange = t0;
             var timeoutMs = 240000;
+            var loopCnt = 0;
             for (;;) {
               await new Promise(function(res){ setTimeout(res, 700); });
+              loopCnt++;
               var cur = assistantText();
+              if (loopCnt % 10 === 0) {
+                var dbgBtn = findSendBtn();
+                log('loop#' + loopCnt + ' textLen=' + cur.length + ' stop=' + (findStopBtn() ? 'Y' : 'N') + ' sendBtn=' + (dbgBtn ? (dbgBtn.disabled ? 'disabled' : 'ok') : 'missing'));
+              }
               if (cur !== lastText) {
                 lastText = cur;
                 lastChange = Date.now();
