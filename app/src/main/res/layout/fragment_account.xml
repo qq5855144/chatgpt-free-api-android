@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="12dp">
+
+        <TextView
+            android:id="@+id/statusText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="未登录"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/webLoginBtn"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="网页登录 ChatGPT（自动提取令牌）" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="或手动粘贴令牌（推荐，最稳定）："
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Access Token（浏览器 DevTools → Local Storage → chatgpt.com → accessToken 的值）" />
+
+        <EditText
+            android:id="@+id/accessTokenInput"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="eyJ…"
+            android:inputType="textMultiLine"
+            android:maxLines="3" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Session Token（可选，用于自动刷新；Cookie 中 __Secure-next-auth.session-token）" />
+
+        <EditText
+            android:id="@+id/sessionInput"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="s%3A…"
+            android:inputType="textMultiLine"
+            android:maxLines="3" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/saveBtn"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="保存令牌" />
+
+            <Button
+                android:id="@+id/clearBtn"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="8dp"
+                android:text="清空" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/helpText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:textSize="12sp"
+            android:text="令牌保存于本机 Keystore 加密存储。\n\n获取方法（电脑浏览器）：\n1. 登录 chatgpt.com，随便发一条消息；\n2. F12 → Application → Local Storage → https://chatgpt.com，复制 accessToken 的 value；\n3. F12 → Application → Cookies → https://chatgpt.com，复制 __Secure-next-auth.session-token 的 value。\n\n注意：令牌即账号凭证，请勿泄露；网页登录方式可能遇到 Cloudflare 验证，失败时请用上方手动粘贴方式。逆向接口有账号风控风险，仅供学习自用。" />
+    </LinearLayout>
+</ScrollView>

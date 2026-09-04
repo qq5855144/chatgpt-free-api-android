@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/navChat"
+        android:icon="@drawable/ic_chat"
+        android:title="聊天" />
+    <item
+        android:id="@+id/navServer"
+        android:icon="@drawable/ic_server"
+        android:title="API 服务" />
+    <item
+        android:id="@+id/navAccount"
+        android:icon="@drawable/ic_account"
+        android:title="账号" />
+</menu>

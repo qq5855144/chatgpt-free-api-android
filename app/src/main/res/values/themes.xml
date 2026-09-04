@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.ChatGPTFree" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/cg_primary</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="android:statusBarColor">@color/cg_primary</item>
+    </style>
+</resources>

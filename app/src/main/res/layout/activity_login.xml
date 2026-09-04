@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <WebView
+        android:id="@+id/webView"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+    <TextView
+        android:id="@+id/tipText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:padding="6dp"
+        android:textSize="12sp"
+        android:text="请在此页面登录 ChatGPT。若出现 Cloudflare 人机验证无法通过，请关闭本页改用「手动粘贴令牌」方式（更稳定）。登录成功后点下方按钮提取令牌。" />
+
+    <Button
+        android:id="@+id/extractBtn"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="我已登录，提取令牌" />
+</LinearLayout>

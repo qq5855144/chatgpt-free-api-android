@@ -1,0 +1,7 @@
+<resources>
+    <color name="cg_primary">#10A37F</color>
+    <color name="ic_launcher_background">#10A37F</color>
+    <color name="user_bubble">#10A37F</color>
+    <color name="assistant_bubble">#E9E9EB</color>
+    <color name="assistant_text">#1F1F1F</color>
+</resources>
