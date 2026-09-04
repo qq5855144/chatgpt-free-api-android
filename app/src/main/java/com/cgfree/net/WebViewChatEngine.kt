@@ -94,6 +94,8 @@ object WebViewChatEngine {
             if (finished) return
             finished = true
             touch()
+            // 关键：清空 running，否则后续会话入队后 pump 因 running!=null 永不执行（首次成功后全卡死）
+            if (running === this) running = null
             onEvent(ChatGPTClient.Event.Done)
             done.countDown()
             scheduleNext()
@@ -104,6 +106,8 @@ object WebViewChatEngine {
             if (finished) return
             finished = true
             touch()
+            // 同上：清理 running 以放行后续会话
+            if (running === this) running = null
             onEvent(ChatGPTClient.Event.Error(WebViewChatEngine.friendlyError(status, message), status))
             done.countDown()
             scheduleNext()
