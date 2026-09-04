@@ -17,6 +17,7 @@ import android.webkit.WebViewClient
 import com.cgfree.BuildConfig
 import com.cgfree.data.ConversationRequest
 import com.cgfree.util.LogBuffer
+import org.json.JSONObject
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -268,6 +269,13 @@ var r = {};
 try { r.url = location.href; } catch(e) { r.url = '?'; }
 try { r.title = document.title; } catch(e) {}
 try {
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', '/api/auth/session', false);
+  xhr.send();
+  r.sessionStatus = xhr.status;
+  r.session = (xhr.responseText || '').slice(0, 300);
+} catch(e) { r.session = 'xhr-err ' + (e.message || e); }
+try {
   var inp = document.querySelector('textarea#prompt-textarea') || document.querySelector('div#prompt-textarea') || document.querySelector('[contenteditable="true"]');
   r.input = inp ? (inp.tagName + '#' + (inp.id || '') + ' textLen=' + ((inp.innerText || inp.value || '').length)) : 'none';
 } catch(e) { r.input = 'err'; }
@@ -301,7 +309,18 @@ AndroidBridge.onDiag(JSON.stringify(r));
         } catch (e: InterruptedException) {
             // ignore
         }
-        return diagResult ?: "{\"error\":\"diag timeout (8s)\"}"
+        val raw = diagResult ?: "{\"error\":\"diag timeout (8s)\"}"
+        // 附加 chatgpt.com cookie 存在性（仅长度，不泄露内容），判断 WebView 会话是否真实落库
+        val cookieLen = try {
+            android.webkit.CookieManager.getInstance().getCookie("https://chatgpt.com")?.length ?: -1
+        } catch (e: Exception) {
+            -2
+        }
+        return try {
+            JSONObject(raw).put("cookieLen", cookieLen).toString()
+        } catch (e: Exception) {
+            raw
+        }
     }
 
     /**
