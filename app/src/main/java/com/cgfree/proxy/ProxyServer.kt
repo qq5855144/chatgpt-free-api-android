@@ -12,9 +12,9 @@ import fi.iki.elonen.NanoHTTPD
 import okhttp3.OkHttpClient
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.OutputStream
+import java.io.PipedInputStream
+import java.io.PipedOutputStream
 import java.util.UUID
-import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
 /**
@@ -31,7 +31,7 @@ class ProxyServer(
     port: Int,
     lan: Boolean,
     private val client: OkHttpClient = ChatGPTClient.newClient()
-) : NanoHTTPD(if (lan) null else "127.0.0.1", port, 120_000) {
+) : NanoHTTPD(if (lan) null else "127.0.0.1", port) {
 
     companion object {
         private var modelsCache: Pair<Long, List<String>>? = null
@@ -175,11 +175,17 @@ class ProxyServer(
     private fun streamResponse(token: String, request: ConversationRequest): Response {
         val id = "chatcmpl-" + UUID.randomUUID().toString().replace("-", "")
         val created = System.currentTimeMillis() / 1000
-        val queue = LinkedBlockingQueue<String>(512)
-        val DONE = "\u0000DONE\u0000"
-
-        // 生产者：调用逆向客户端并翻译为 OpenAI SSE 块
         val acc = com.cgfree.util.TextAccumulator()
+
+        // Piped 管道：生产者线程写 OpenAI SSE 块，NanoHTTPD newChunkedResponse 流式发送
+        val pos = PipedOutputStream()
+        val pis = PipedInputStream(pos, 64 * 1024)
+
+        fun writeSse(text: String) {
+            pos.write(text.toByteArray(Charsets.UTF_8))
+            pos.flush()
+        }
+
         val producer = Thread({
             try {
                 var first = true
@@ -192,59 +198,50 @@ class ProxyServer(
                         when (ev) {
                             is ChatGPTClient.Event.Delta -> {
                                 if (first) {
-                                    queue.put(sseChunk(id, created, request.model, role = "assistant", content = ""))
+                                    writeSse(sseChunk(id, created, request.model, role = "assistant", content = ""))
                                     first = false
                                 }
                                 acc.push(ev.text) { delta ->
-                                    queue.put(sseChunk(id, created, request.model, content = delta))
+                                    writeSse(sseChunk(id, created, request.model, content = delta))
                                 }
                             }
                             is ChatGPTClient.Event.Final -> {
                                 if (first) {
-                                    queue.put(sseChunk(id, created, request.model, role = "assistant", content = ""))
+                                    writeSse(sseChunk(id, created, request.model, role = "assistant", content = ""))
                                     first = false
                                 }
                                 acc.push(ev.text) { delta ->
-                                    queue.put(sseChunk(id, created, request.model, content = delta))
+                                    writeSse(sseChunk(id, created, request.model, content = delta))
                                 }
                             }
                             is ChatGPTClient.Event.ConvId -> { /* 忽略 */ }
                             is ChatGPTClient.Event.Error -> {
-                                queue.put(sseErrorChunk(id, created, request.model, ev.message))
+                                writeSse(sseErrorChunk(id, created, request.model, ev.message))
                             }
                             ChatGPTClient.Event.Done -> { /* 由流结束处理 */ }
                         }
                     }
                 )
-                queue.put(sseFinishChunk(id, created, request.model))
-                queue.put("data: [DONE]\n\n")
+                writeSse(sseFinishChunk(id, created, request.model))
+                writeSse("data: [DONE]\n\n")
             } catch (e: Exception) {
+                // 客户端断开或上游异常：尽力发送错误块后结束
                 try {
-                    queue.put(sseErrorChunk(id, created, request.model, e.message ?: "stream error"))
-                    queue.put("data: [DONE]\n\n")
+                    writeSse(sseErrorChunk(id, created, request.model, e.message ?: "stream error"))
+                    writeSse("data: [DONE]\n\n")
                 } catch (ignored: Exception) {
                 }
             } finally {
-                queue.put(DONE)
+                try {
+                    pos.close()
+                } catch (ignored: Exception) {
+                }
             }
         }, "cgfree-producer")
         producer.isDaemon = true
         producer.start()
 
-        val resp = ChunkedStreamedResponse(Response.Status.OK, "text/event-stream; charset=utf-8",
-            object : IStreamer {
-                override fun sendToOutput(out: OutputStream) {
-                    try {
-                        while (true) {
-                            val chunk = queue.poll(30, TimeUnit.SECONDS) ?: break
-                            if (chunk == DONE) break
-                            out.write(chunk.toByteArray(Charsets.UTF_8))
-                            out.flush()
-                        }
-                    } catch (ignored: Exception) {
-                    }
-                }
-            })
+        val resp = newChunkedResponse(Response.Status.OK, "text/event-stream; charset=utf-8", pis)
         return cors(resp)
     }
 

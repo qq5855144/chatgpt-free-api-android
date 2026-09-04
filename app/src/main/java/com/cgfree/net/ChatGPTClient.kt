@@ -1,7 +1,7 @@
 package com.cgfree.net
 
 import com.cgfree.data.ConversationRequest
-import okhttp3.MediaType
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
@@ -20,7 +20,7 @@ import java.util.concurrent.TimeUnit
 object ChatGPTClient {
 
     const val WEB_BASE = "https://chatgpt.com"
-    private val JSON = MediaType.get("application/json; charset=utf-8")
+    private val JSON = "application/json; charset=utf-8".toMediaType()
     private val UA =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
