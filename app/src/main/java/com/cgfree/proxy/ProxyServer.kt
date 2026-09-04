@@ -69,14 +69,23 @@ class ProxyServer(
 
         return when {
             path == "/" || path == "/health" -> info()
+            path == "/__diag" -> diag()
             path == "/v1/models" -> models()
             path == "/v1/chat/completions" && method == "POST" -> completions(session)
             path == "/v1/chat/completions" -> jsonError(405, "method not allowed")
             else -> jsonError(404, "not found: $path")
         }
     }
-
     // ---------- 基础端点 ----------
+    /** 页面诊断：返回隐藏 WebView 的真实状态（URL/输入框/节点/错误元素），供调试定位 */
+    private fun diag(): Response {
+        val j = try {
+            JSONObject(WebViewChatEngine.diag())
+        } catch (e: Exception) {
+            JSONObject().put("error", "diag failed: ${e.message}")
+        }
+        return json(200, j)
+    }
 
     private fun info(): Response {
         val j = JSONObject()

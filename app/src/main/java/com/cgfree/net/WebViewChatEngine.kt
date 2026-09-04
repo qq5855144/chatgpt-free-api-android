@@ -59,6 +59,13 @@ object WebViewChatEngine {
     @Volatile
     private var running: Session? = null
 
+    /** diag() 同步等待句柄（JS 结果经 AndroidBridge.onDiag 回填） */
+    @Volatile
+    private var diagLatch: CountDownLatch? = null
+
+    @Volatile
+    private var diagResult: String? = null
+
     /** 单次对话会话：事件转发 + 阻塞等待 */
     private class Session(
         val request: ConversationRequest,
@@ -175,6 +182,11 @@ object WebViewChatEngine {
                         LogBuffer.log("[WV-UI] $msg")
                         Log.i("CGFREE_JS", msg)
                     }
+                    @JavascriptInterface
+                    fun onDiag(json: String) {
+                        diagResult = json
+                        diagLatch?.countDown()
+                    }
                 }, "AndroidBridge")
                 w.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView?, url: String?) {
@@ -233,6 +245,63 @@ object WebViewChatEngine {
             }
             return pageReady
         }
+    }
+
+    /**
+     * 页面诊断：查询隐藏 WebView 的真实状态（URL/输入框/assistant 节点/发送按钮/错误元素等），
+     * 主线程 evaluateJavascript 执行，阻塞至多 8s。结果 JSON 字符串（失败返回 error 字段）。
+     * 供代理 /__diag 端点调试用，定位"UI 自动化输入/发送无效"时页面到底处于什么状态。
+     */
+    fun diag(): String {
+        val l = CountDownLatch(1)
+        diagLatch = l
+        diagResult = null
+        main.post {
+            val w = wv
+            if (w == null) {
+                diagResult = "{\"error\":\"wv is null (engine not initialized)\"}"
+                l.countDown()
+                return@post
+            }
+            val js = """(function(){
+var r = {};
+try { r.url = location.href; } catch(e) { r.url = '?'; }
+try { r.title = document.title; } catch(e) {}
+try {
+  var inp = document.querySelector('textarea#prompt-textarea') || document.querySelector('div#prompt-textarea') || document.querySelector('[contenteditable="true"]');
+  r.input = inp ? (inp.tagName + '#' + (inp.id || '') + ' textLen=' + ((inp.innerText || inp.value || '').length)) : 'none';
+} catch(e) { r.input = 'err'; }
+try {
+  var nodes = document.querySelectorAll('[data-message-author-role="assistant"]');
+  r.assistantCount = nodes.length;
+  r.lastAssistant = nodes.length ? String(nodes[nodes.length - 1].innerText || '').slice(0, 300) : '';
+} catch(e) { r.assistantCount = -1; }
+try {
+  var sb = document.querySelector('button[data-testid="send-button"]');
+  r.sendBtn = sb ? 'found' : 'missing';
+  r.sendDisabled = sb ? sb.disabled : null;
+  r.stopBtn = !!document.querySelector('button[data-testid="stop-button"]');
+} catch(e) {}
+try {
+  var err = document.querySelector('[role="alert"], [class*="error" i], [class*="Error"]');
+  r.errorEl = err ? String(err.innerText || err.textContent || '').slice(0, 200) : '';
+} catch(e) {}
+try { r.bodyHead = document.body ? document.body.innerText.slice(0, 400) : ''; } catch(e) {}
+AndroidBridge.onDiag(JSON.stringify(r));
+})()"""
+            try {
+                w.evaluateJavascript(js, null)
+            } catch (e: Exception) {
+                diagResult = "{\"error\":\"evaluateJavascript: ${e.message}\"}"
+                l.countDown()
+            }
+        }
+        try {
+            l.await(8, TimeUnit.SECONDS)
+        } catch (e: InterruptedException) {
+            // ignore
+        }
+        return diagResult ?: "{\"error\":\"diag timeout (8s)\"}"
     }
 
     /**
