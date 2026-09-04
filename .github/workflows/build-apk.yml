@@ -49,8 +49,10 @@ jobs:
           name: app-debug-${{ github.sha }}
           path: app/build/outputs/apk/debug/*.apk
 
-      - name: Upload release APK
+      # 只上传签名产物（app-release.apk）；若因配置问题产出 unsigned 包则直接失败，避免误传
+      - name: Upload signed release APK
         uses: actions/upload-artifact@v4
         with:
           name: app-release-${{ github.sha }}
-          path: app/build/outputs/apk/release/*.apk
+          path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error

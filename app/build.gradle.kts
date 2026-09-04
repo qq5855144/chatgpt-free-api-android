@@ -8,21 +8,25 @@ plugins {
 }
 
 // ============ Release 签名配置（双通道，密钥绝不入库） ============
-// 通道 1：本地开发 —— 项目根目录放 keystore.properties（已被 .gitignore 忽略）：
-//   storeFile=./release.keystore
-//   storePassword=xxx
-//   keyAlias=xxx
-//   keyPassword=xxx
-// 通道 2：CI —— GitHub Actions Secrets（见 .github/workflows/build-apk.yml）：
-//   KEYSTORE_BASE64（keystore 文件 base64）/ KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD
+// 通道 1：仓库内置 keystore —— keystore.properties（storeFile/storePassword/keyAlias/keyPassword）
+// 通道 2：CI Secrets 覆盖 —— KEYSTORE_BASE64（keystore 文件 base64）/ KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD
+//   （Secrets 存在时优先于 keystore.properties，便于 fork 后自行更换密钥）
 val keystoreProps = Properties().apply {
     val f = rootProject.file("keystore.properties")
     if (f.exists()) f.inputStream().use { load(it) }
 }
 
-fun secret(name: String): String? =
-    System.getenv(name)?.takeIf { it.isNotBlank() }
-        ?: keystoreProps.getProperty(name)?.takeIf { it.isNotBlank() }
+/** 取密钥配置：先读环境变量（CI Secrets），再回退 keystore.properties（含别名映射） */
+fun secret(envName: String): String? {
+    System.getenv(envName)?.takeIf { it.isNotBlank() }?.let { return it }
+    val propName = when (envName) {
+        "KEYSTORE_PASSWORD" -> "storePassword"
+        "KEY_ALIAS" -> "keyAlias"
+        "KEY_PASSWORD" -> "keyPassword"
+        else -> envName
+    }
+    return keystoreProps.getProperty(propName)?.takeIf { it.isNotBlank() }
+}
 
 val releaseStoreFile: File? = when {
     secret("KEYSTORE_BASE64") != null -> {
