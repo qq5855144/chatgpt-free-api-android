@@ -55,6 +55,12 @@ class ProxyService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // 幂等保护：服务已在运行（instance 非空）时不重复创建，
+        // 避免重复 bind 端口抛异常进入 catch 分支误 stopSelf 杀掉正常服务
+        if (instance != null) {
+            return START_STICKY
+        }
+
         val port = Prefs.port(this)
         val lan = Prefs.lanEnabled(this)
         val apiKey = Prefs.apiKey(this)
@@ -77,7 +83,7 @@ class ProxyService : Service() {
     override fun onDestroy() {
         runCatching { instance?.stop() }
         instance = null
-        LogBuffer.log("proxy 已停止")
+        LogBuffer.log("proxy 已停止（手动停止或系统回收）")
         super.onDestroy()
     }
 

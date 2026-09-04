@@ -79,13 +79,17 @@ class ChatFragment : Fragment() {
             val list = runCatching { ChatGPTClient.fetchModels(token) }.getOrNull()
             if (list.isNullOrEmpty()) return@launch
             withContext(Dispatchers.Main) {
-                val cur = Prefs.model(requireContext())
-                val preset = ArrayList(ModelConst.PRESET)
+                // 账号真实可用模型放最前，预设补在后面
+                val preset = ArrayList<String>()
                 for (m in list) if (m !in preset) preset.add(m)
+                for (m in ModelConst.PRESET) if (m !in preset) preset.add(m)
                 val sa = ArrayAdapter(requireContext(), android.R.layout.simple_spinner_dropdown_item, preset)
                 b.modelSpinner.adapter = sa
+                val cur = Prefs.model(requireContext())
                 val i = preset.indexOf(cur).takeIf { it >= 0 } ?: 0
                 b.modelSpinner.setSelection(i)
+                // 原默认模型不在账号可用列表时，回写真实可用模型，避免发送时用不存在的模型
+                if (preset.indexOf(cur) < 0) Prefs.setModel(requireContext(), preset[i])
             }
         }
     }
