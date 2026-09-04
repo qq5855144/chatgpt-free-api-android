@@ -86,8 +86,14 @@ object ChatGPTClient {
         client: OkHttpClient = newClient()
     ) {
         var token = accessToken
+        // 已向上游发出过任何内容事件则不再重试（避免重复输出）
+        var emitted = false
+        val guard = { ev: Event ->
+            if (ev is Event.Delta || ev is Event.Final) emitted = true
+            onEvent(ev)
+        }
         try {
-            runOnce(token, request, onEvent, client)
+            runOnce(token, request, guard, client)
         } catch (e: ApiException) {
             // 401/403：尝试用 session 刷新
             if ((e.status == 401 || e.status == 403) && !sessionToken.isNullOrBlank()) {
@@ -96,17 +102,29 @@ object ChatGPTClient {
                     onRefreshed(refreshed)
                     token = refreshed
                     try {
-                        runOnce(token, request, onEvent, client)
+                        runOnce(token, request, guard, client)
                         return
                     } catch (e2: Exception) {
-                        onEvent(Event.Error(describe(e2), (e2 as? ApiException)?.status))
+                        guard(Event.Error(describe(e2), (e2 as? ApiException)?.status))
                         return
                     }
                 }
             }
-            onEvent(Event.Error(e.message ?: "请求失败", e.status))
+            guard(Event.Error(e.message ?: "请求失败", e.status))
         } catch (e: Exception) {
-            onEvent(Event.Error(describe(e), null))
+            // 瞬时网络异常（上游偶发挂起/断流）且尚未输出任何内容：静默重试一次
+            val retryable = !emitted && (e is java.net.SocketTimeoutException || e is java.io.IOException)
+            if (retryable) {
+                try {
+                    Thread.sleep(1500)
+                    runOnce(token, request, guard, client)
+                    return
+                } catch (e2: Exception) {
+                    guard(Event.Error(describe(e2), (e2 as? ApiException)?.status))
+                    return
+                }
+            }
+            guard(Event.Error(describe(e), null))
         }
     }
 

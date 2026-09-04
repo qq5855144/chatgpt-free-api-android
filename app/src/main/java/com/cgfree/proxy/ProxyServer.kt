@@ -152,7 +152,7 @@ class ProxyServer(
             historyAndTrainingDisabled = historyDisabled
         )
 
-        LogBuffer.log("POST /v1/chat/completions model=$model stream=$stream msgs=${chatMsgs.size}")
+        LogBuffer.log("POST /v1/chat/completions model=$model stream=$stream msgs=${chatMsgs.size} roles=${chatMsgs.groupingBy { it.role }.eachCount()}")
 
         return if (stream) streamResponse(token, request) else syncResponse(token, request)
     }
@@ -261,20 +261,28 @@ class ProxyServer(
         var error: String? = null
         val t0 = System.currentTimeMillis()
 
-        ChatGPTClient.streamConversation(
-            token,
-            TokenStore.getSessionToken(appContext),
-            request,
-            onRefreshed = { newTok -> TokenStore.saveAccessToken(appContext, newTok) },
-            onEvent = { ev ->
-                when (ev) {
-                    is ChatGPTClient.Event.Delta -> acc.push(ev.text) { sb.append(it) }
-                    is ChatGPTClient.Event.Final -> acc.push(ev.text) { sb.append(it) }
-                    is ChatGPTClient.Event.Error -> error = ev.message
-                    else -> { /* ignore */ }
+        try {
+            ChatGPTClient.streamConversation(
+                token,
+                TokenStore.getSessionToken(appContext),
+                request,
+                onRefreshed = { newTok -> TokenStore.saveAccessToken(appContext, newTok) },
+                onEvent = { ev ->
+                    when (ev) {
+                        is ChatGPTClient.Event.Delta -> acc.push(ev.text) { sb.append(it) }
+                        is ChatGPTClient.Event.Final -> acc.push(ev.text) { sb.append(it) }
+                        is ChatGPTClient.Event.Error -> error = ev.message
+                        else -> { /* ignore */ }
+                    }
                 }
-            }
-        )
+            )
+        } catch (e: Exception) {
+            LogBuffer.log("sync 异常: ${e.message} model=${request.model}")
+            val j = JSONObject().put("error", JSONObject()
+                .put("message", "上游请求失败：${e.message ?: "未知错误"}")
+                .put("type", "upstream_error"))
+            return json(502, j)
+        }
 
         if (error != null) {
             LogBuffer.log("sync 上游错误: $error model=${request.model}")
