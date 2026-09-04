@@ -25,6 +25,28 @@ object ChatGPTClient {
     private val UA =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
+    /** 设备标识：模拟网页版 oai-device-id（进程内稳定，配合 cookie 通过设备风控检查） */
+    @Volatile
+    private var deviceId: String? = null
+    private fun deviceId(): String {
+        if (deviceId == null) deviceId = UUID.randomUUID().toString()
+        return deviceId!!
+    }
+
+    /** 组装模拟网页版的浏览器特征头（Cookie + 设备标识 + sec-ch 系列） */
+    private fun Request.Builder.browserHeaders(sessionToken: String?): Request.Builder {
+        header("User-Agent", UA)
+        header("Accept-Language", "en-US,en;q=0.9")
+        header("sec-ch-ua", "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\", \"Not-A.Brand\";v=\"99\"")
+        header("sec-ch-ua-mobile", "?0")
+        header("sec-ch-ua-platform", "\"Windows\"")
+        header("oai-device-id", deviceId())
+        if (sessionToken != null) {
+            header("Cookie", "__Secure-next-auth.session-token=$sessionToken; oai-did=${deviceId()}")
+        }
+        return this
+    }
+
     /** 流式事件 */
     sealed class Event {
         /** 增量文本 */
@@ -103,7 +125,7 @@ object ChatGPTClient {
             onEvent(ev)
         }
         try {
-            runOnce(token, request, guard, client)
+            runOnce(token, sessionToken, request, guard, client)
         } catch (e: ApiException) {
             // 401/403：尝试用 session 刷新
             if ((e.status == 401 || e.status == 403) && !sessionToken.isNullOrBlank()) {
@@ -112,7 +134,7 @@ object ChatGPTClient {
                     onRefreshed(refreshed)
                     token = refreshed
                     try {
-                        runOnce(token, request, guard, client)
+                        runOnce(token, sessionToken, request, guard, client)
                         return
                     } catch (e2: Exception) {
                         guard(Event.Error(describe(e2), (e2 as? ApiException)?.status))
@@ -130,7 +152,7 @@ object ChatGPTClient {
                 try {
                     Thread.sleep(1500)
                     val retryClient = if (client.protocols.contains(Protocol.HTTP_2)) newHttp11Client() else client
-                    runOnce(token, request, guard, retryClient)
+                    runOnce(token, sessionToken, request, guard, retryClient)
                     return
                 } catch (e2: Exception) {
                     guard(Event.Error(describe(e2), (e2 as? ApiException)?.status))
@@ -143,6 +165,7 @@ object ChatGPTClient {
 
     private fun runOnce(
         token: String,
+        sessionToken: String?,
         request: ConversationRequest,
         onEvent: (Event) -> Unit,
         client: OkHttpClient
@@ -151,7 +174,7 @@ object ChatGPTClient {
         val http = Request.Builder()
             .url("$WEB_BASE/backend-api/conversation")
             .header("Authorization", "Bearer $token")
-            .header("User-Agent", UA)
+            .browserHeaders(sessionToken)
             .header("Accept", "text/event-stream")
             .header("Content-Type", "application/json")
             .header("Origin", WEB_BASE)
@@ -213,9 +236,8 @@ object ChatGPTClient {
         return runCatching {
             val req = Request.Builder()
                 .url("$WEB_BASE/api/auth/session")
-                .header("User-Agent", UA)
                 .header("Accept", "application/json")
-                .header("Cookie", "__Secure-next-auth.session-token=$sessionToken")
+                .browserHeaders(sessionToken)
                 .get()
                 .build()
             client.newCall(req).execute().use { resp ->
@@ -283,11 +305,14 @@ object ChatGPTClient {
     }
 
     private fun friendlyError(code: Int, body: String): String {
-        val detail = body.take(160).replace('\n', ' ')
-        return when (code) {
-            401 -> "登录失效（401）：Access Token 无效或已过期，请重新登录/刷新令牌。$detail"
-            403 -> "访问被拒绝（403）：令牌权限不足或触发风控，请重新获取令牌后重试。$detail"
-            429 -> "请求过于频繁（429）：免费额度限流，请稍后再试。$detail"
+        val detail = body.take(200).replace('\n', ' ')
+        val unusual = detail.contains("Unusual activity", ignoreCase = true)
+        return when {
+            code == 401 -> "登录失效（401）：Access Token 无效或已过期，请重新登录/刷新令牌。$detail"
+            code == 403 && unusual ->
+                "触发设备/IP 风控（403 Unusual activity）：OpenAI 检测到当前设备或网络异常。建议：① 更换网络（切换 Wi-Fi/热点/VPN 节点）后重试；② 用浏览器打开 chatgpt.com 确认能否正常对话；③ 等 10-30 分钟冷却。$detail"
+            code == 403 -> "访问被拒绝（403）：令牌权限不足或触发风控，请重新获取令牌后重试。$detail"
+            code == 429 -> "请求过于频繁（429）：免费额度限流，请稍后再试。$detail"
             else -> "请求失败（HTTP $code）：$detail"
         }
     }
