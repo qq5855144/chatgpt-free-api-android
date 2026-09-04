@@ -407,7 +407,7 @@ AndroidBridge.onDiag(JSON.stringify(r));
         onEvent: (ChatGPTClient.Event) -> Unit,
         onToken: (String) -> Unit = {},
         readyTimeoutMs: Long = 30_000,
-        chatTimeoutMs: Long = 300_000,
+        chatTimeoutMs: Long = 150_000,
         useUi: Boolean = false
     ): Boolean {
         // 本方法会阻塞等待 WebView JS 回调；JS 回调依赖主线程消息循环，
@@ -495,7 +495,7 @@ AndroidBridge.onDiag(JSON.stringify(r));
     /** 组装在 chatgpt.com 同源页面内执行的对话 JS（fetch → SSE 解析 → 回调） */
     private fun buildJs(request: ConversationRequest, useUi: Boolean): String {
         if (useUi) {
-            val text = lastUserText(request)
+            val text = promptText(request)
             return JS_TEMPLATE_UI.replace("__MSG__", jsStr(text))
         }
         val payload = ChatGPTClient.buildBody(request)
@@ -506,13 +506,25 @@ AndroidBridge.onDiag(JSON.stringify(r));
             .replace("__BUILD_ID__", buildId)
             .replace("__BODY__", body)
     }
-    /** 取最后一条 user 消息纯文本（UI 自动化需要打字进输入框） */
-    private fun lastUserText(request: ConversationRequest): String {
-        for (i in request.messages.indices.reversed()) {
-            val m = request.messages[i]
-            if (m.role == "user" && m.content.isNotBlank()) return m.content
-        }
-        return request.messages.lastOrNull()?.content ?: "hi"
+    /**
+     * UI 通道本身没有调用方的对话上下文，因此把 OpenAI messages 转成一段明确的提示词。
+     * 单条 user 消息保持原样；多轮/含 system 时保留角色与顺序，避免此前只发送最后一句而丢上下文。
+     */
+    private fun promptText(request: ConversationRequest): String {
+        val usable = request.messages.filter { it.content.isNotBlank() }
+        if (usable.size == 1 && usable[0].role == "user") return usable[0].content
+        if (usable.isEmpty()) return "hi"
+        return buildString {
+            append("请根据下面的完整对话继续回复最后一条用户消息。\n\n")
+            usable.forEach { message ->
+                val role = when (message.role) {
+                    "system" -> "系统"
+                    "assistant" -> "助手"
+                    else -> "用户"
+                }
+                append(role).append("：").append(message.content).append("\n\n")
+            }
+        }.trimEnd()
     }
     /** JS 单引号字符串转义（含换行 → \\n） */
     private fun jsStr(s: String): String = s
@@ -520,6 +532,8 @@ AndroidBridge.onDiag(JSON.stringify(r));
         .replace("'", "\\'")
         .replace("\r", "\\r")
         .replace("\n", "\\n")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
 
     /** JS→Kotlin 桥说明：addJavascriptInterface 使用匿名 object 实现（方法自动在主线程回调） */
 
@@ -616,6 +630,17 @@ AndroidBridge.onDiag(JSON.stringify(r));
         (async function(){
           var log = function(m){ try { AndroidBridge.onLog(m); } catch(e){} };
           try {
+            // 先验证真实 WebView 会话，避免在登录页/验证页上空等数分钟。
+            var auth = null;
+            try {
+              var authResp = await fetch('/api/auth/session', {credentials:'include', cache:'no-store'});
+              auth = authResp.ok ? await authResp.json() : null;
+            } catch(e) {}
+            if (!auth || !auth.accessToken) {
+              AndroidBridge.onError(401, 'ChatGPT 网页登录已失效，请到账号页重新登录');
+              return;
+            }
+            AndroidBridge.onToken(auth.accessToken);
             function setNativeValue(el, value) {
               var proto = Object.getPrototypeOf(el);
               var desc = Object.getOwnPropertyDescriptor(proto, 'value');
@@ -623,13 +648,11 @@ AndroidBridge.onDiag(JSON.stringify(r));
               el.dispatchEvent(new Event('input', { bubbles: true }));
             }
             function findInput() {
-              var q = document.querySelector('textarea#prompt-textarea');
+              var q = document.querySelector('#prompt-textarea');
               if (q) return q;
-              q = document.querySelector('div#prompt-textarea');
+              q = document.querySelector('main textarea');
               if (q) return q;
-              q = document.querySelector('textarea[placeholder]');
-              if (q) return q;
-              q = document.querySelector('[contenteditable="true"]');
+              q = document.querySelector('main [contenteditable="true"]');
               return q;
             }
             function findSendBtn() {
@@ -641,7 +664,18 @@ AndroidBridge.onDiag(JSON.stringify(r));
               return b;
             }
             function findStopBtn() {
-              return document.querySelector('button[data-testid="stop-button"]');
+              return document.querySelector('button[data-testid="stop-button"]') ||
+                document.querySelector('button[aria-label*="Stop"]') ||
+                document.querySelector('button[aria-label*="停止"]');
+            }
+            function pageError() {
+              var el = document.querySelector('[role="alert"]');
+              var text = el ? String(el.innerText || el.textContent || '').trim() : '';
+              if (text) return text.slice(0, 300);
+              var body = document.body ? String(document.body.innerText || '') : '';
+              var marks = ['Something went wrong', 'Our systems are a bit busy', 'Unusual activity', '出错了', '系统繁忙'];
+              for (var mi = 0; mi < marks.length; mi++) if (body.indexOf(marks[mi]) >= 0) return marks[mi];
+              return '';
             }
             function assistantText() {
               var nodes = document.querySelectorAll('[data-message-author-role="assistant"]');
@@ -699,6 +733,8 @@ AndroidBridge.onDiag(JSON.stringify(r));
             for (var wi2 = 0; wi2 < 40; wi2++) {
               input = findInput();
               if (input) break;
+              var earlyError = pageError();
+              if (earlyError) { AndroidBridge.onError(0, earlyError); return; }
               if (wi2 % 6 === 5) log('wait-input ' + ((wi2 + 1) * 500) + 'ms');
               await new Promise(function(res){ setTimeout(res, 500); });
             }
@@ -731,20 +767,30 @@ AndroidBridge.onDiag(JSON.stringify(r));
               sendBtn.click();
               log('send-by-click');
             } else {
-              log('send-btn=' + (sendBtn ? 'disabled' : 'missing') + ', fallback-enter');
-              input.focus();
-              input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
-              input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
-              log('enter-sent');
+              AndroidBridge.onError(0, '发送按钮不可用，请检查页面验证或输入状态');
+              return;
             }
             var t0 = Date.now();
+            // 点击后必须在 12 秒内出现“输入已清空 / 正在生成 / 新回复”之一。
+            // 失败时快速返回，禁止再次发送，避免旧逻辑最多重复提交三次相同消息。
+            var accepted = false;
+            for (var wa = 0; wa < 24; wa++) {
+              var inputNow = findInput();
+              var inputNowText = inputNow ? (((inputNow.isContentEditable === true) || inputNow.tagName === 'DIV') ? (inputNow.innerText || '') : (inputNow.value || '')) : '';
+              if (findStopBtn() || assistantCount() > preCount || inputNowText.length === 0) { accepted = true; break; }
+              var acceptError = pageError();
+              if (acceptError) { AndroidBridge.onError(0, acceptError); return; }
+              await new Promise(function(res){ setTimeout(res, 500); });
+            }
+            if (!accepted) {
+              AndroidBridge.onError(0, '点击发送后 12 秒页面仍无响应，请打开账号页检查验证状态');
+              return;
+            }
             var lastText = pre;
             var lastChange = t0;
             var stableCnt = 0;
-            var timeoutMs = 240000;
+            var timeoutMs = 120000;
             var loopCnt = 0;
-            var lastSendAt = Date.now();
-            var sendRetries = 0;
             function finish(cur) {
               AndroidBridge.onEvent(cur);
               log('ui-done, len=' + cur.length + ', cost=' + ((Date.now() - t0) / 1000).toFixed(1) + 's');
@@ -761,7 +807,7 @@ AndroidBridge.onDiag(JSON.stringify(r));
               var newReply = (nodeCount > preCount) || (cur.length > pre.length);
               if (loopCnt % 10 === 0 || (newReply && stableCnt === 0)) {
                 var dbgBtn = findSendBtn();
-                log('loop#' + loopCnt + ' textLen=' + cur.length + ' nodes=' + nodeCount + '/' + preCount + ' stop=' + (stopNow ? 'Y' : 'N') + ' sendBtn=' + (dbgBtn ? (dbgBtn.disabled ? 'disabled' : 'ok') : 'missing') + ' stable=' + stableCnt + ' retries=' + sendRetries + ' new=' + (newReply ? 'Y' : 'N'));
+                log('loop#' + loopCnt + ' textLen=' + cur.length + ' nodes=' + nodeCount + '/' + preCount + ' stop=' + (stopNow ? 'Y' : 'N') + ' sendBtn=' + (dbgBtn ? (dbgBtn.disabled ? 'disabled' : 'ok') : 'missing') + ' stable=' + stableCnt + ' new=' + (newReply ? 'Y' : 'N'));
               }
               if (cur !== lastText) {
                 lastText = cur;
@@ -771,40 +817,18 @@ AndroidBridge.onDiag(JSON.stringify(r));
               } else if (newReply) {
                 if (!stopNow) stableCnt++; else stableCnt = 0;
               }
-              // 发送自愈：15s 无新回复且无生成中标记 → 重新输入+发送（最多 3 次）
-              if (!newReply && !stopNow && sendRetries < 3 && Date.now() - lastSendAt > 15000) {
-                sendRetries++;
-                log('resend #' + sendRetries + ' (textLen=' + cur.length + ' nodes=' + nodeCount + '/' + preCount + ')');
-                var inp2 = findInput();
-                if (inp2) {
-                  var c2 = ((inp2.isContentEditable === true) || (inp2.tagName === 'DIV')) ? (inp2.innerText || '') : (inp2.value || '');
-                  if (c2.length === 0) { typeText(inp2); await new Promise(function(res){ setTimeout(res, 1000); }); }
-                  var b2 = null;
-                  for (var wi4 = 0; wi4 < 10; wi4++) {
-                    b2 = findSendBtn();
-                    if (b2 && !b2.disabled) break;
-                    await new Promise(function(res){ setTimeout(res, 300); });
-                  }
-                  b2 = findSendBtn();
-                  if (b2 && !b2.disabled) { b2.click(); log('resend-click'); }
-                  else {
-                    inp2.focus();
-                    inp2.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
-                    log('resend-enter');
-                  }
-                }
-                lastSendAt = Date.now();
-              }
               var sendBtn2 = findSendBtn();
               var done = !stopNow && newReply && sendBtn2 && !sendBtn2.disabled;
               if (done) { finish(cur); return; }
               if (!stopNow && newReply && stableCnt >= 5) { finish(cur); return; }
+              var runtimeError = pageError();
+              if (!stopNow && runtimeError && !newReply) { AndroidBridge.onError(0, runtimeError); return; }
               if (Date.now() - t0 > timeoutMs) {
-                AndroidBridge.onError(0, 'UI 对话等待超时 240s（最后文本长度=' + cur.length + ' 节点=' + nodeCount + '/' + preCount + '，可能页面出现错误提示/验证）');
+                AndroidBridge.onError(0, 'UI 对话等待超时 120s（最后文本长度=' + cur.length + ' 节点=' + nodeCount + '/' + preCount + '，可能页面出现错误提示/验证）');
                 return;
               }
-              if (Date.now() - lastChange > 90000 && newReply) {
-                AndroidBridge.onError(0, 'UI 对话输出停滞 90s（最后文本长度=' + cur.length + ' 节点=' + nodeCount + '/' + preCount + '）');
+              if (Date.now() - lastChange > 30000 && newReply && !stopNow) {
+                AndroidBridge.onError(0, 'UI 对话输出停滞 30s（最后文本长度=' + cur.length + ' 节点=' + nodeCount + '/' + preCount + '）');
                 return;
               }
             }

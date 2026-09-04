@@ -17,6 +17,7 @@ import java.io.PipedInputStream
 import java.io.PipedOutputStream
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 本地 OpenAI 兼容反向代理服务器。
@@ -267,37 +268,36 @@ class ProxyServer(
         // 256KB 缓冲：WebView 通道的事件在主线程回调写入管道，缓冲越大越不易阻塞主线程
         val pos = PipedOutputStream()
         val pis = PipedInputStream(pos, 256 * 1024)
+        val producerDone = AtomicBoolean(false)
 
         fun writeSse(text: String) {
-            pos.write(text.toByteArray(Charsets.UTF_8))
-            pos.flush()
+            synchronized(pos) {
+                pos.write(text.toByteArray(Charsets.UTF_8))
+                pos.flush()
+            }
         }
 
         val producer = Thread({
             try {
-                var first = true
+                // 立即写出首个 SSE 块，让 NanoHTTPD 立刻发送响应头。此前只有上游返回
+                // 第一段文字后才写管道，WebView 初始化/页面生成期间客户端会误以为连接卡死。
+                writeSse(sseChunk(id, created, request.model, role = "assistant", content = ""))
+                var terminalError = false
                 val handle: (ChatGPTClient.Event) -> Unit = { ev ->
                     when (ev) {
                         is ChatGPTClient.Event.Delta -> {
-                            if (first) {
-                                writeSse(sseChunk(id, created, request.model, role = "assistant", content = ""))
-                                first = false
-                            }
                             acc.push(ev.text) { delta ->
                                 writeSse(sseChunk(id, created, request.model, content = delta))
                             }
                         }
                         is ChatGPTClient.Event.Final -> {
-                            if (first) {
-                                writeSse(sseChunk(id, created, request.model, role = "assistant", content = ""))
-                                first = false
-                            }
                             acc.push(ev.text) { delta ->
                                 writeSse(sseChunk(id, created, request.model, content = delta))
                             }
                         }
                         is ChatGPTClient.Event.ConvId -> { /* 忽略 */ }
                         is ChatGPTClient.Event.Error -> {
+                            terminalError = true
                             LogBuffer.log("stream 上游错误: ${ev.message}")
                             writeSse(sseErrorChunk(id, created, request.model, ev.message))
                         }
@@ -306,7 +306,7 @@ class ProxyServer(
                 }
                 // WebView 指纹通道优先，引擎不可用时内部回退 OkHttp
                 upstreamConversation(token, request, handle)
-                writeSse(sseFinishChunk(id, created, request.model))
+                if (!terminalError) writeSse(sseFinishChunk(id, created, request.model))
                 writeSse("data: [DONE]\n\n")
                 LogBuffer.log("stream 完成 model=${request.model} 耗时 ${(System.currentTimeMillis() - t0) / 1000}s")
             } catch (e: Exception) {
@@ -318,6 +318,7 @@ class ProxyServer(
                 } catch (ignored: Exception) {
                 }
             } finally {
+                producerDone.set(true)
                 try {
                     pos.close()
                 } catch (ignored: Exception) {
@@ -326,6 +327,21 @@ class ProxyServer(
         }, "cgfree-producer")
         producer.isDaemon = true
         producer.start()
+
+        // 上游首字可能需要较长时间；SSE 注释不会影响 OpenAI 客户端解析，
+        // 但能阻止反向代理、HTTP 库或系统网络层把安静连接误判为超时。
+        val heartbeat = Thread({
+            try {
+                while (!producerDone.get()) {
+                    Thread.sleep(10_000)
+                    if (!producerDone.get()) writeSse(": keep-alive\n\n")
+                }
+            } catch (ignored: Exception) {
+                // 客户端断开或 producer 已关闭管道，心跳线程自然结束。
+            }
+        }, "cgfree-sse-heartbeat")
+        heartbeat.isDaemon = true
+        heartbeat.start()
 
         val resp = newChunkedResponse(Response.Status.OK, "text/event-stream; charset=utf-8", pis)
         return cors(resp)
@@ -368,6 +384,13 @@ class ProxyServer(
         }
 
         val text = sb.toString()
+        if (text.isBlank()) {
+            LogBuffer.log("sync 上游返回空内容 model=${request.model}")
+            val j = JSONObject().put("error", JSONObject()
+                .put("message", "上游未返回任何回复内容，请检查登录状态或页面验证后重试")
+                .put("type", "upstream_empty_response"))
+            return json(502, j)
+        }
         LogBuffer.log("sync 完成 model=${request.model} 字符=${text.length} 耗时 ${(System.currentTimeMillis() - t0) / 1000}s")
         val pTokens = estimateTokens(chatChars(request.messages))
         val cTokens = estimateTokens(text.length)
