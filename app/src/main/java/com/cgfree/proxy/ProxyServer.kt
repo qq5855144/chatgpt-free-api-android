@@ -92,7 +92,9 @@ class ProxyServer(
         if (cached != null && System.currentTimeMillis() - cached.first < MODELS_TTL_MS) {
             list = cached.second
         } else if (token != null) {
-            list = runCatching { ChatGPTClient.fetchModels(token, client) }.getOrNull()
+            list = runCatching { ChatGPTClient.fetchModels(token, client) }
+                .onFailure { LogBuffer.log("拉取模型列表失败: ${it.message}（使用预设列表）") }
+                .getOrNull()
             if (list != null) modelsCache = System.currentTimeMillis() to list
         }
         val models = list ?: ModelConst.PRESET
@@ -176,6 +178,7 @@ class ProxyServer(
         val id = "chatcmpl-" + UUID.randomUUID().toString().replace("-", "")
         val created = System.currentTimeMillis() / 1000
         val acc = com.cgfree.util.TextAccumulator()
+        val t0 = System.currentTimeMillis()
 
         // Piped 管道：生产者线程写 OpenAI SSE 块，NanoHTTPD newChunkedResponse 流式发送
         val pos = PipedOutputStream()
@@ -216,6 +219,7 @@ class ProxyServer(
                             }
                             is ChatGPTClient.Event.ConvId -> { /* 忽略 */ }
                             is ChatGPTClient.Event.Error -> {
+                                LogBuffer.log("stream 上游错误: ${ev.message}")
                                 writeSse(sseErrorChunk(id, created, request.model, ev.message))
                             }
                             ChatGPTClient.Event.Done -> { /* 由流结束处理 */ }
@@ -224,7 +228,9 @@ class ProxyServer(
                 )
                 writeSse(sseFinishChunk(id, created, request.model))
                 writeSse("data: [DONE]\n\n")
+                LogBuffer.log("stream 完成 model=${request.model} 耗时 ${(System.currentTimeMillis() - t0) / 1000}s")
             } catch (e: Exception) {
+                LogBuffer.log("stream 异常: ${e.message}")
                 // 客户端断开或上游异常：尽力发送错误块后结束
                 try {
                     writeSse(sseErrorChunk(id, created, request.model, e.message ?: "stream error"))
@@ -253,6 +259,7 @@ class ProxyServer(
         val sb = StringBuilder()
         val acc = com.cgfree.util.TextAccumulator()
         var error: String? = null
+        val t0 = System.currentTimeMillis()
 
         ChatGPTClient.streamConversation(
             token,
@@ -270,6 +277,7 @@ class ProxyServer(
         )
 
         if (error != null) {
+            LogBuffer.log("sync 上游错误: $error model=${request.model}")
             val j = JSONObject().put("error", JSONObject()
                 .put("message", error)
                 .put("type", "upstream_error"))
@@ -277,6 +285,7 @@ class ProxyServer(
         }
 
         val text = sb.toString()
+        LogBuffer.log("sync 完成 model=${request.model} 字符=${text.length} 耗时 ${(System.currentTimeMillis() - t0) / 1000}s")
         val pTokens = estimateTokens(chatChars(request.messages))
         val cTokens = estimateTokens(text.length)
         val j = JSONObject()
