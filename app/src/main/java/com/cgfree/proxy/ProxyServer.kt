@@ -92,7 +92,13 @@ class ProxyServer(
         if (cached != null && System.currentTimeMillis() - cached.first < MODELS_TTL_MS) {
             list = cached.second
         } else if (token != null) {
-            list = runCatching { ChatGPTClient.fetchModels(token, client) }
+            list = runCatching {
+                ChatGPTClient.fetchModels(
+                    token, client,
+                    cookie = TokenStore.getCookie(appContext),
+                    sessionToken = TokenStore.getSessionToken(appContext)
+                )
+            }
                 .onFailure { LogBuffer.log("拉取模型列表失败: ${it.message}（使用预设列表）") }
                 .getOrNull()
             if (list != null) modelsCache = System.currentTimeMillis() to list
@@ -195,6 +201,7 @@ class ProxyServer(
                 ChatGPTClient.streamConversation(
                     token,
                     TokenStore.getSessionToken(appContext),
+                    TokenStore.getCookie(appContext),
                     request,
                     onRefreshed = { newTok -> TokenStore.saveAccessToken(appContext, newTok) },
                     onEvent = { ev ->
@@ -263,19 +270,20 @@ class ProxyServer(
 
         try {
             ChatGPTClient.streamConversation(
-                token,
-                TokenStore.getSessionToken(appContext),
-                request,
-                onRefreshed = { newTok -> TokenStore.saveAccessToken(appContext, newTok) },
-                onEvent = { ev ->
-                    when (ev) {
-                        is ChatGPTClient.Event.Delta -> acc.push(ev.text) { sb.append(it) }
-                        is ChatGPTClient.Event.Final -> acc.push(ev.text) { sb.append(it) }
-                        is ChatGPTClient.Event.Error -> error = ev.message
-                        else -> { /* ignore */ }
-                    }
+            token,
+            TokenStore.getSessionToken(appContext),
+            TokenStore.getCookie(appContext),
+            request,
+            onRefreshed = { newTok -> TokenStore.saveAccessToken(appContext, newTok) },
+            onEvent = { ev ->
+                when (ev) {
+                    is ChatGPTClient.Event.Delta -> acc.push(ev.text) { sb.append(it) }
+                    is ChatGPTClient.Event.Final -> acc.push(ev.text) { sb.append(it) }
+                    is ChatGPTClient.Event.Error -> error = ev.message
+                    else -> { /* ignore */ }
                 }
-            )
+            }
+        )
         } catch (e: Exception) {
             LogBuffer.log("sync 异常: ${e.message} model=${request.model}")
             val j = JSONObject().put("error", JSONObject()

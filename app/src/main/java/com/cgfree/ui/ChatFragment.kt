@@ -74,9 +74,12 @@ class ChatFragment : Fragment() {
     }
 
     private fun refreshModels() {
-        val token = TokenStore.getAccessToken(requireContext()) ?: return
+        val ctx = requireContext()
+        val token = TokenStore.getAccessToken(ctx) ?: return
+        val cookie = TokenStore.getCookie(ctx)
+        val sess = TokenStore.getSessionToken(ctx)
         viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
-            val list = runCatching { ChatGPTClient.fetchModels(token) }.getOrNull()
+            val list = runCatching { ChatGPTClient.fetchModels(token, cookie = cookie, sessionToken = sess) }.getOrNull()
             if (list.isNullOrEmpty()) return@launch
             withContext(Dispatchers.Main) {
                 // 账号真实可用模型放最前，预设补在后面
@@ -132,6 +135,7 @@ class ChatFragment : Fragment() {
             ChatGPTClient.streamConversation(
                 token,
                 TokenStore.getSessionToken(requireContext()),
+                TokenStore.getCookie(requireContext()),
                 request,
                 onRefreshed = { newTok ->
                     TokenStore.saveAccessToken(requireContext(), newTok)

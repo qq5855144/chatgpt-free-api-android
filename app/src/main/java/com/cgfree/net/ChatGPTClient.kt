@@ -33,17 +33,21 @@ object ChatGPTClient {
         return deviceId!!
     }
 
-    /** 组装模拟网页版的浏览器特征头（Cookie + 设备标识 + sec-ch 系列） */
-    private fun Request.Builder.browserHeaders(sessionToken: String?): Request.Builder {
+    /** 组装模拟网页版的浏览器特征头（Cookie 优先用 WebView 登录的完整串，回退 session-token 拼装 + sec-ch/sec-fetch 系列） */
+    private fun Request.Builder.browserHeaders(sessionToken: String?, cookie: String?): Request.Builder {
         header("User-Agent", UA)
-        header("Accept-Language", "en-US,en;q=0.9")
+        header("Accept-Language", "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7")
         header("sec-ch-ua", "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\", \"Not-A.Brand\";v=\"99\"")
         header("sec-ch-ua-mobile", "?0")
         header("sec-ch-ua-platform", "\"Windows\"")
+        header("sec-fetch-dest", "empty")
+        header("sec-fetch-mode", "cors")
+        header("sec-fetch-site", "same-origin")
+        header("priority", "u=1, i")
         header("oai-device-id", deviceId())
-        if (sessionToken != null) {
-            header("Cookie", "__Secure-next-auth.session-token=$sessionToken; oai-did=${deviceId()}")
-        }
+        val ck = cookie?.takeIf { it.isNotBlank() }
+            ?: sessionToken?.let { "__Secure-next-auth.session-token=$it; oai-did=${deviceId()}" }
+        if (ck != null) header("Cookie", ck)
         return this
     }
 
@@ -84,11 +88,16 @@ object ChatGPTClient {
         .build()
 
     /** 拉取当前账号可用模型列表 */
-    fun fetchModels(accessToken: String, client: OkHttpClient = newClient()): List<String> {
+    fun fetchModels(
+        accessToken: String,
+        client: OkHttpClient = newClient(),
+        cookie: String? = null,
+        sessionToken: String? = null
+    ): List<String> {
         val req = Request.Builder()
             .url("$WEB_BASE/backend-api/models")
             .header("Authorization", "Bearer $accessToken")
-            .header("User-Agent", UA)
+            .browserHeaders(sessionToken, cookie)
             .header("Accept", "application/json")
             .get()
             .build()
@@ -107,11 +116,13 @@ object ChatGPTClient {
 
     /**
      * 流式对话（阻塞调用，请放到后台线程）。
+     * @param cookie 网页登录的完整 Cookie（WebView 登录时自动保存；缺失则回退 session-token 拼装）
      * @param onRefreshed 401 后成功用 sessionToken 刷新出新 accessToken 时回调（调用方负责持久化）
      */
     fun streamConversation(
         accessToken: String,
         sessionToken: String?,
+        cookie: String?,
         request: ConversationRequest,
         onRefreshed: (String) -> Unit,
         onEvent: (Event) -> Unit,
@@ -125,16 +136,16 @@ object ChatGPTClient {
             onEvent(ev)
         }
         try {
-            runOnce(token, sessionToken, request, guard, client)
+            runOnce(token, sessionToken, cookie, request, guard, client)
         } catch (e: ApiException) {
             // 401/403：尝试用 session 刷新
             if ((e.status == 401 || e.status == 403) && !sessionToken.isNullOrBlank()) {
-                val refreshed = refreshAccessToken(sessionToken, client)
+                val refreshed = refreshAccessToken(sessionToken, cookie, client)
                 if (!refreshed.isNullOrBlank()) {
                     onRefreshed(refreshed)
                     token = refreshed
                     try {
-                        runOnce(token, sessionToken, request, guard, client)
+                        runOnce(token, sessionToken, cookie, request, guard, client)
                         return
                     } catch (e2: Exception) {
                         guard(Event.Error(describe(e2), (e2 as? ApiException)?.status))
@@ -152,7 +163,7 @@ object ChatGPTClient {
                 try {
                     Thread.sleep(1500)
                     val retryClient = if (client.protocols.contains(Protocol.HTTP_2)) newHttp11Client() else client
-                    runOnce(token, sessionToken, request, guard, retryClient)
+                    runOnce(token, sessionToken, cookie, request, guard, retryClient)
                     return
                 } catch (e2: Exception) {
                     guard(Event.Error(describe(e2), (e2 as? ApiException)?.status))
@@ -166,6 +177,7 @@ object ChatGPTClient {
     private fun runOnce(
         token: String,
         sessionToken: String?,
+        cookie: String?,
         request: ConversationRequest,
         onEvent: (Event) -> Unit,
         client: OkHttpClient
@@ -174,7 +186,7 @@ object ChatGPTClient {
         val http = Request.Builder()
             .url("$WEB_BASE/backend-api/conversation")
             .header("Authorization", "Bearer $token")
-            .browserHeaders(sessionToken)
+            .browserHeaders(sessionToken, cookie)
             .header("Accept", "text/event-stream")
             .header("Content-Type", "application/json")
             .header("Origin", WEB_BASE)
@@ -232,12 +244,12 @@ object ChatGPTClient {
     }
 
     /** 用 session cookie 换取新 accessToken */
-    private fun refreshAccessToken(sessionToken: String, client: OkHttpClient): String? {
+    private fun refreshAccessToken(sessionToken: String, cookie: String?, client: OkHttpClient): String? {
         return runCatching {
             val req = Request.Builder()
                 .url("$WEB_BASE/api/auth/session")
                 .header("Accept", "application/json")
-                .browserHeaders(sessionToken)
+                .browserHeaders(sessionToken, cookie)
                 .get()
                 .build()
             client.newCall(req).execute().use { resp ->

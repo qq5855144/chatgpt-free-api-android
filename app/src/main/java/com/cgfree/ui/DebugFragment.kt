@@ -215,7 +215,11 @@ class DebugFragment : Fragment() {
             return
         }
         try {
-            val models = ChatGPTClient.fetchModels(token, http)
+            val models = ChatGPTClient.fetchModels(
+                token, http,
+                cookie = TokenStore.getCookie(ctx),
+                sessionToken = TokenStore.getSessionToken(ctx)
+            )
             cachedModels = models
             log("✓ accessToken 有效，账号可用模型 ${models.size} 个：")
             log(models.take(20).joinToString("、"))
