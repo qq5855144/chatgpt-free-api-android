@@ -10,6 +10,7 @@ import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -67,7 +68,15 @@ object WebViewChatEngine {
     ) {
         val done = CountDownLatch(1)
         private var finished = false
-
+        /** pump 已调用 evaluateJavascript（JS 已注入） */
+        @Volatile
+        var injected = false
+        /** 最近一次 JS 信号（onLog/onEvent/onDone/onError）时间戳，用于僵尸引擎检测 */
+        @Volatile
+        var lastSignal = System.currentTimeMillis()
+        fun touch() { lastSignal = System.currentTimeMillis() }
+        @Synchronized
+        fun isFinished(): Boolean = finished
         /**
          * JS 回调：新的全文快照（SSE message.content.parts，逐事件增长）。
          * 事件语义与 OkHttp 通道一致：Delta 携带全文快照，由消费方用 TextAccumulator 差分出增量。
@@ -75,6 +84,7 @@ object WebViewChatEngine {
         @Synchronized
         fun push(snapshot: String) {
             if (finished || snapshot.isEmpty()) return
+            touch()
             onEvent(ChatGPTClient.Event.Delta(snapshot))
         }
 
@@ -83,16 +93,17 @@ object WebViewChatEngine {
         fun finish() {
             if (finished) return
             finished = true
+            touch()
             onEvent(ChatGPTClient.Event.Done)
             done.countDown()
             scheduleNext()
         }
-
         /** JS 回调：错误 */
         @Synchronized
         fun fail(status: Int?, message: String) {
             if (finished) return
             finished = true
+            touch()
             onEvent(ChatGPTClient.Event.Error(WebViewChatEngine.friendlyError(status, message), status))
             done.countDown()
             scheduleNext()
@@ -156,6 +167,7 @@ object WebViewChatEngine {
                     }
                     @JavascriptInterface
                     fun onLog(msg: String) {
+                        running?.touch()
                         LogBuffer.log("[WV-UI] $msg")
                         Log.i("CGFREE_JS", msg)
                     }
@@ -177,6 +189,15 @@ object WebViewChatEngine {
                         if (request?.isForMainFrame == true && !pageReady) {
                             LogBuffer.log("WebView 引擎首页加载错误 code=${error?.errorCode}（等待自动重试/超时兜底）")
                         }
+                    }
+                    override fun onRenderProcessGone(
+                        view: WebView?,
+                        detail: RenderProcessGoneDetail?
+                    ): Boolean {
+                        LogBuffer.log("WebView 渲染进程已退出（crash=${detail?.didCrash() == true}），销毁引擎待自动重建")
+                        Log.i("CGFREE_JS", "renderer-gone crash=${detail?.didCrash() == true}")
+                        destroyEngine()
+                        return true
                     }
                 }
                 wv = w
@@ -207,6 +228,35 @@ object WebViewChatEngine {
     }
 
     /**
+     * 销毁引擎并重置状态（任意线程可调，销毁动作在主线程执行；随后 ensure() 会重建）。
+     * 用于 WebView 渲染进程被系统回收（僵尸引擎，evaluateJavascript 静默失效）后的自愈。
+     */
+    private fun destroyEngine() {
+        synchronized(lock) {
+            initStarted = false
+            initFailed = false
+            pageReady = false
+        }
+        main.post {
+            val old = wv
+            wv = null
+            try {
+                old?.stopLoading()
+                old?.destroy()
+            } catch (e: Exception) {
+                LogBuffer.log("WebView 销毁异常: ${e.message}")
+            }
+            // 清理排队中的会话（running 由调用方心跳检测负责 fail）
+            while (queue.isNotEmpty()) {
+                try {
+                    queue.removeFirst().fail(null, "引擎已重建，请重试")
+                } catch (ignored: Exception) {
+                }
+            }
+        }
+    }
+
+    /**
      * 阻塞发起一次对话（调用线程等待完成/超时）。事件经 [ChatGPTClient.Event] 回调。
      * @return true=已通过 WebView 发起（错误也以 Event.Error 上报）；false=引擎不可用（调用方回退 OkHttp）
      */
@@ -231,22 +281,55 @@ object WebViewChatEngine {
             return false
         }
         if (wv == null) return false
-
         val session = Session(request, onEvent, onToken, useUi)
         main.post {
             queue.addLast(session)
             pump()
         }
-
-        val completed = try {
-            session.done.await(chatTimeoutMs, TimeUnit.MILLISECONDS)
-        } catch (e: InterruptedException) {
-            false
-        }
-        if (!completed) {
-            session.fail(null, "WebView 对话超时（${chatTimeoutMs / 1000}s），请重试")
+        val deadline = System.currentTimeMillis() + chatTimeoutMs
+        var retries = 0
+        while (!session.isFinished()) {
+            val remain = deadline - System.currentTimeMillis()
+            if (remain <= 0) {
+                session.fail(null, "WebView 对话超时（${chatTimeoutMs / 1000}s），请重试")
+                break
+            }
+            val doneNow = try {
+                session.done.await(minOf(500L, remain), TimeUnit.MILLISECONDS)
+            } catch (e: InterruptedException) {
+                true
+            }
+            if (doneNow || session.isFinished()) break
+            // 僵尸引擎检测：JS 已注入但 25s 无任何信号 → 渲染进程被系统回收（evaluateJavascript 静默失效）
+            if (session.injected && System.currentTimeMillis() - session.lastSignal > 25_000) {
+                retries++
+                if (retries > 2) {
+                    session.fail(null, "WebView 引擎连续无响应，请重试")
+                    break
+                }
+                LogBuffer.log("WebView 引擎无响应（渲染进程可能已被系统回收），销毁重建自动重试（第 $retries 轮）")
+                Log.i("CGFREE_JS", "engine-zombie retry=$retries")
+                destroyEngine()
+                ensure(context)
+                if (!waitReady(90_000)) {
+                    session.fail(null, "WebView 引擎重建后仍未就绪（90s）")
+                    break
+                }
+                retrySession(session)
+            }
         }
         return true
+    }
+
+    /** 主线程：将同一会话重置后重新入队执行（引擎重建后重试，对调用方透明） */
+    private fun retrySession(s: Session) {
+        main.post {
+            if (running === s) running = null
+            s.injected = false
+            s.touch()
+            queue.addLast(s)
+            pump()
+        }
     }
 
     /** 主线程：串行取出队列中的会话并执行 */
@@ -261,6 +344,7 @@ object WebViewChatEngine {
             return
         }
         try {
+            s.injected = true
             w.evaluateJavascript(buildJs(s.request, s.useUi), null)
         } catch (e: Exception) {
             running = null
