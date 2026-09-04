@@ -76,6 +76,8 @@ object WebViewChatEngine {
     ) {
         val done = CountDownLatch(1)
         private var finished = false
+        /** 会话创建时间（state() 诊断用） */
+        val createdAt = System.currentTimeMillis()
         /** pump 已调用 evaluateJavascript（JS 已注入） */
         @Volatile
         var injected = false
@@ -320,6 +322,28 @@ AndroidBridge.onDiag(JSON.stringify(r));
             JSONObject(raw).put("cookieLen", cookieLen).toString()
         } catch (e: Exception) {
             raw
+        }
+    }
+
+    /** 引擎内部状态快照（running/队列/pageReady/心跳等），供 /__state 调试 */
+    fun state(): String {
+        val now = System.currentTimeMillis()
+        val s = running
+        return try {
+            JSONObject()
+                .put("wv", wv != null)
+                .put("pageReady", pageReady)
+                .put("initStarted", initStarted)
+                .put("initFailed", initFailed)
+                .put("queueSize", queue.size)
+                .put("running", s != null)
+                .put("runningInjected", s?.injected ?: false)
+                .put("runningAgeMs", if (s != null) now - s.createdAt else -1)
+                .put("lastSignalAgeMs", if (s != null) now - s.lastSignal else -1)
+                .put("runningFinished", s?.isFinished() ?: false)
+                .toString()
+        } catch (e: Exception) {
+            "{\"error\":\"${e.message}\"}"
         }
     }
 

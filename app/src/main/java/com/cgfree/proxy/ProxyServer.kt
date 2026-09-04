@@ -70,6 +70,8 @@ class ProxyServer(
         return when {
             path == "/" || path == "/health" -> info()
             path == "/__diag" -> diag()
+            path == "/__state" -> engineState()
+            path == "/__log" -> engineLog()
             path == "/v1/models" -> models()
             path == "/v1/chat/completions" && method == "POST" -> completions(session)
             path == "/v1/chat/completions" -> jsonError(405, "method not allowed")
@@ -84,6 +86,14 @@ class ProxyServer(
         } catch (e: Exception) {
             JSONObject().put("error", "diag failed: ${e.message}")
         }
+        return json(200, j)
+    }
+    /** 引擎内部状态（running/队列/pageReady），供调试定位会话排队/卡死 */
+    private fun engineState(): Response = json(200, runCatching { JSONObject(WebViewChatEngine.state()) }.getOrElse { JSONObject().put("error", it.message) })
+    /** LogBuffer 尾部快照（引擎超时/回退/僵尸等 LogBuffer-only 日志），供调试定位 */
+    private fun engineLog(): Response {
+        val lines = com.cgfree.util.LogBuffer.snapshot().lines().takeLast(120)
+        val j = JSONObject().put("lines", JSONArray().apply { lines.forEach { put(it) } })
         return json(200, j)
     }
 
