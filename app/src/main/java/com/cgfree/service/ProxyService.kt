@@ -87,7 +87,9 @@ class ProxyService : Service() {
         super.onDestroy()
     }
 
-    private val NanoHttpdTimeoutMs = 60_000
+    // NanoHTTPD 会对每个客户端 socket 设置 SO_TIMEOUT=该值；
+    // 代理 serve() 需同步等待上游最长达数十秒，60s 会误杀长请求 → 放宽到 15 分钟
+    private val NanoHttpdTimeoutMs = 900_000
 
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

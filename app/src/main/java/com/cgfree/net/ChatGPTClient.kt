@@ -47,17 +47,17 @@ object ChatGPTClient {
 
     fun newClient(): OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(5, TimeUnit.MINUTES)
-        .writeTimeout(5, TimeUnit.MINUTES)
-        .callTimeout(10, TimeUnit.MINUTES)
+        .readTimeout(45, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .callTimeout(2, TimeUnit.MINUTES)
         .build()
 
     /** HTTP/1.1 专用客户端（同超时）：部分中间网络对 HTTP/2 SSE 长连接处理异常（黑洞/掐断），降级 1.1 可绕开 */
     fun newHttp11Client(): OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(5, TimeUnit.MINUTES)
-        .writeTimeout(5, TimeUnit.MINUTES)
-        .callTimeout(10, TimeUnit.MINUTES)
+        .readTimeout(45, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .callTimeout(2, TimeUnit.MINUTES)
         .protocols(listOf(Protocol.HTTP_1_1))
         .build()
 

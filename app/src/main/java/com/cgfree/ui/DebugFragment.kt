@@ -11,6 +11,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.Toast
 import androidx.fragment.app.Fragment
+import com.cgfree.BuildConfig
 import com.cgfree.data.Prefs
 import com.cgfree.data.TokenStore
 import com.cgfree.databinding.FragmentDebugBinding
@@ -99,6 +100,7 @@ class DebugFragment : Fragment() {
             "已登录${if (!email.isNullOrBlank()) "（$email）" else ""}"
         } else "未登录（请先到「账号」页登录/粘贴令牌）"
         b.debugStatus.text = buildString {
+            append("版本：v").append(BuildConfig.VERSION_NAME).append('\n')
             append("登录：").append(loginState).append('\n')
             append("accessToken：").append(mask(acc)).append('\n')
             append("sessionToken：").append(mask(sess)).append('\n')

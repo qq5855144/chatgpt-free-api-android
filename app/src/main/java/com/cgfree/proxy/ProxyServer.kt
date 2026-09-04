@@ -42,8 +42,8 @@ class ProxyServer(
         return try {
             route(session)
         } catch (e: Exception) {
-            LogBuffer.log("server error: ${e.message}")
-            jsonError(500, "内部错误: ${e.message}")
+            LogBuffer.log("server error [${e.javaClass.simpleName}]: ${e.message}")
+            jsonError(500, "内部错误[${e.javaClass.simpleName}]: ${e.message}")
         }
     }
 
