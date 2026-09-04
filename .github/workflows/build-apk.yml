@@ -42,7 +42,16 @@ jobs:
 
       # debug 与 release 均使用仓库内置 keystore 签名（KEYSTORE_BASE64 配置时自动覆盖）
       - name: Build signed APKs (debug + release)
-        run: ./gradlew :app:assembleDebug :app:assembleRelease
+        run: |
+          ./gradlew :app:assembleDebug :app:assembleRelease 2>&1 | tee /tmp/build.log
+          exit ${PIPESTATUS[0]}
+      # 构建失败也上传完整日志，便于远程排查（Actions 日志下载接口需 admin 权限）
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: /tmp/build.log
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4

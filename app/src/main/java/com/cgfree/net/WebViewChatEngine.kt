@@ -88,13 +88,13 @@ object WebViewChatEngine {
         fun fail(status: Int?, message: String) {
             if (finished) return
             finished = true
-            onEvent(ChatGPTClient.Event.Error(friendlyError(status, message), status))
+            onEvent(ChatGPTClient.Event.Error(WebViewChatEngine.friendlyError(status, message), status))
             done.countDown()
             scheduleNext()
         }
 
         private fun scheduleNext() {
-            main.post { pump() }
+            WebViewChatEngine.main.post { WebViewChatEngine.pump() }
         }
     }
 
@@ -117,7 +117,28 @@ object WebViewChatEngine {
                 w.settings.cacheMode = WebSettings.LOAD_DEFAULT
                 // 去掉 "; wv" 标识，使 UA 与普通 Chrome 完全一致（登录 WebView 同款处理）
                 w.settings.userAgentString = w.settings.userAgentString.replace("; wv", "")
-                w.addJavascriptInterface(Bridge(), "AndroidBridge")
+                w.addJavascriptInterface(object {
+                    @JavascriptInterface
+                    fun onToken(token: String) {
+                        val s = running ?: return
+                        if (token.isNotBlank()) s.onToken(token)
+                    }
+
+                    @JavascriptInterface
+                    fun onEvent(snapshot: String) {
+                        running?.push(snapshot)
+                    }
+
+                    @JavascriptInterface
+                    fun onDone() {
+                        running?.finish()
+                    }
+
+                    @JavascriptInterface
+                    fun onError(status: Int, message: String) {
+                        running?.fail(if (status == 0) null else status, message)
+                    }
+                }, "AndroidBridge")
                 w.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView?, url: String?) {
                         synchronized(lock) {
@@ -236,29 +257,7 @@ object WebViewChatEngine {
             .replace("__BODY__", body)
     }
 
-    /** JS→Kotlin 桥（WebView 自动在主线程回调） */
-    private inner class Bridge {
-        @JavascriptInterface
-        fun onToken(token: String) {
-            val s = running ?: return
-            if (token.isNotBlank()) s.onToken(token)
-        }
-
-        @JavascriptInterface
-        fun onEvent(snapshot: String) {
-            running?.push(snapshot)
-        }
-
-        @JavascriptInterface
-        fun onDone() {
-            running?.finish()
-        }
-
-        @JavascriptInterface
-        fun onError(status: Int, message: String) {
-            running?.fail(if (status == 0) null else status, message)
-        }
-    }
+    /** JS→Kotlin 桥说明：addJavascriptInterface 使用匿名 object 实现（方法自动在主线程回调） */
 
     private fun friendlyError(status: Int?, message: String): String {
         val detail = message.take(220).replace('\n', ' ')
