@@ -12,6 +12,11 @@ jobs:
   build:
     name: Build & upload APK
     runs-on: ubuntu-latest
+    env:
+      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+      KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,16 +40,15 @@ jobs:
       - name: Build debug APK
         run: ./gradlew :app:assembleDebug
 
-      # 仓库配置了如下 Secrets 时自动产出签名 Release APK：
-      #   KEYSTORE_BASE64 / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD
+      # 配置了 Secrets（KEYSTORE_BASE64 等）时自动产出签名 Release APK，
+      # 未配置则打印提示并跳过（不会失败）。
       - name: Build signed release APK
-        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: ./gradlew :app:assembleRelease
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            ./gradlew :app:assembleRelease
+          else
+            echo "未配置 KEYSTORE_BASE64，跳过签名 Release 构建（仅产出 debug APK）"
+          fi
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
@@ -52,8 +56,17 @@ jobs:
           name: app-debug-${{ github.sha }}
           path: app/build/outputs/apk/debug/*.apk
 
+      - name: Check release APK exists
+        id: rel
+        run: |
+          if ls app/build/outputs/apk/release/*.apk >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Upload release APK
-        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
+        if: steps.rel.outputs.exists == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: app-release-${{ github.sha }}
