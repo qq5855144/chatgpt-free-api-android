@@ -7,6 +7,7 @@ import com.cgfree.data.ModelConst
 import com.cgfree.data.Prefs
 import com.cgfree.data.TokenStore
 import com.cgfree.net.ChatGPTClient
+import com.cgfree.net.WebViewChatEngine
 import com.cgfree.util.LogBuffer
 import fi.iki.elonen.NanoHTTPD
 import okhttp3.OkHttpClient
@@ -180,15 +181,54 @@ class ProxyServer(
 
     // ---------- SSE 流式响应 ----------
 
+    /**
+     * 上游对话统一入口：优先走 WebView 指纹通道（真实 Chromium 网络栈，
+     * UA/TLS/HTTP2/Cookie 与浏览器一致，可绕过 OpenAI 设备指纹风控）；
+     * 引擎不可用（初始化失败/页面超时）时自动回退 OkHttp 通道。
+     */
+    private fun upstreamConversation(
+        token: String,
+        request: ConversationRequest,
+        onEvent: (ChatGPTClient.Event) -> Unit
+    ) {
+        val engineOk = try {
+            WebViewChatEngine.chatBlocking(
+                appContext, request,
+                onToken = { newTok ->
+                    if (newTok.isNotBlank()) {
+                        TokenStore.saveAccessToken(appContext, newTok)
+                        LogBuffer.log("WebView 通道已自动刷新 accessToken")
+                    }
+                },
+                onEvent = onEvent
+            )
+        } catch (e: Exception) {
+            LogBuffer.log("WebView 通道异常，回退 OkHttp: ${e.message}")
+            false
+        }
+        if (!engineOk) {
+            LogBuffer.log("使用 OkHttp 通道（WebView 引擎不可用）")
+            ChatGPTClient.streamConversation(
+                token,
+                TokenStore.getSessionToken(appContext),
+                TokenStore.getCookie(appContext),
+                request,
+                onRefreshed = { newTok -> TokenStore.saveAccessToken(appContext, newTok) },
+                onEvent = onEvent
+            )
+        }
+    }
+
     private fun streamResponse(token: String, request: ConversationRequest): Response {
         val id = "chatcmpl-" + UUID.randomUUID().toString().replace("-", "")
         val created = System.currentTimeMillis() / 1000
         val acc = com.cgfree.util.TextAccumulator()
         val t0 = System.currentTimeMillis()
 
-        // Piped 管道：生产者线程写 OpenAI SSE 块，NanoHTTPD newChunkedResponse 流式发送
+        // Piped 管道：生产者线程写 OpenAI SSE 块，NanoHTTPD newChunkedResponse 流式发送。
+        // 256KB 缓冲：WebView 通道的事件在主线程回调写入管道，缓冲越大越不易阻塞主线程
         val pos = PipedOutputStream()
-        val pis = PipedInputStream(pos, 64 * 1024)
+        val pis = PipedInputStream(pos, 256 * 1024)
 
         fun writeSse(text: String) {
             pos.write(text.toByteArray(Charsets.UTF_8))
@@ -198,41 +238,36 @@ class ProxyServer(
         val producer = Thread({
             try {
                 var first = true
-                ChatGPTClient.streamConversation(
-                    token,
-                    TokenStore.getSessionToken(appContext),
-                    TokenStore.getCookie(appContext),
-                    request,
-                    onRefreshed = { newTok -> TokenStore.saveAccessToken(appContext, newTok) },
-                    onEvent = { ev ->
-                        when (ev) {
-                            is ChatGPTClient.Event.Delta -> {
-                                if (first) {
-                                    writeSse(sseChunk(id, created, request.model, role = "assistant", content = ""))
-                                    first = false
-                                }
-                                acc.push(ev.text) { delta ->
-                                    writeSse(sseChunk(id, created, request.model, content = delta))
-                                }
+                val handle: (ChatGPTClient.Event) -> Unit = { ev ->
+                    when (ev) {
+                        is ChatGPTClient.Event.Delta -> {
+                            if (first) {
+                                writeSse(sseChunk(id, created, request.model, role = "assistant", content = ""))
+                                first = false
                             }
-                            is ChatGPTClient.Event.Final -> {
-                                if (first) {
-                                    writeSse(sseChunk(id, created, request.model, role = "assistant", content = ""))
-                                    first = false
-                                }
-                                acc.push(ev.text) { delta ->
-                                    writeSse(sseChunk(id, created, request.model, content = delta))
-                                }
+                            acc.push(ev.text) { delta ->
+                                writeSse(sseChunk(id, created, request.model, content = delta))
                             }
-                            is ChatGPTClient.Event.ConvId -> { /* 忽略 */ }
-                            is ChatGPTClient.Event.Error -> {
-                                LogBuffer.log("stream 上游错误: ${ev.message}")
-                                writeSse(sseErrorChunk(id, created, request.model, ev.message))
-                            }
-                            ChatGPTClient.Event.Done -> { /* 由流结束处理 */ }
                         }
+                        is ChatGPTClient.Event.Final -> {
+                            if (first) {
+                                writeSse(sseChunk(id, created, request.model, role = "assistant", content = ""))
+                                first = false
+                            }
+                            acc.push(ev.text) { delta ->
+                                writeSse(sseChunk(id, created, request.model, content = delta))
+                            }
+                        }
+                        is ChatGPTClient.Event.ConvId -> { /* 忽略 */ }
+                        is ChatGPTClient.Event.Error -> {
+                            LogBuffer.log("stream 上游错误: ${ev.message}")
+                            writeSse(sseErrorChunk(id, created, request.model, ev.message))
+                        }
+                        ChatGPTClient.Event.Done -> { /* 由流结束处理 */ }
                     }
-                )
+                }
+                // WebView 指纹通道优先，引擎不可用时内部回退 OkHttp
+                upstreamConversation(token, request, handle)
                 writeSse(sseFinishChunk(id, created, request.model))
                 writeSse("data: [DONE]\n\n")
                 LogBuffer.log("stream 完成 model=${request.model} 耗时 ${(System.currentTimeMillis() - t0) / 1000}s")
@@ -269,13 +304,8 @@ class ProxyServer(
         val t0 = System.currentTimeMillis()
 
         try {
-            ChatGPTClient.streamConversation(
-            token,
-            TokenStore.getSessionToken(appContext),
-            TokenStore.getCookie(appContext),
-            request,
-            onRefreshed = { newTok -> TokenStore.saveAccessToken(appContext, newTok) },
-            onEvent = { ev ->
+            // WebView 指纹通道优先，引擎不可用时内部回退 OkHttp
+            upstreamConversation(token, request) { ev ->
                 when (ev) {
                     is ChatGPTClient.Event.Delta -> acc.push(ev.text) { sb.append(it) }
                     is ChatGPTClient.Event.Final -> acc.push(ev.text) { sb.append(it) }
@@ -283,7 +313,6 @@ class ProxyServer(
                     else -> { /* ignore */ }
                 }
             }
-        )
         } catch (e: Exception) {
             LogBuffer.log("sync 异常: ${e.message} model=${request.model}")
             val j = JSONObject().put("error", JSONObject()

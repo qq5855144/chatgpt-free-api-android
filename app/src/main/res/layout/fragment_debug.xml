@@ -133,6 +133,19 @@
                     android:textSize="11sp"
                     android:text="⑥ 对话·流式(SSE)" />
             </LinearLayout>
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:layout_marginBottom="4dp"
+                android:orientation="horizontal">
+                <Button
+                    android:id="@+id/btnChatWebview"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textSize="11sp"
+                    android:text="⑦ WebView对话·指纹直连（绕过设备指纹风控验证）" />
+            </LinearLayout>
         </LinearLayout>
     </ScrollView>
 

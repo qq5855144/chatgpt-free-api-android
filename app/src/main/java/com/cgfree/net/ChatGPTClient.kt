@@ -260,8 +260,8 @@ object ChatGPTClient {
         }.getOrNull()
     }
 
-    /** 组装 backend-api/conversation 请求体（逆向自网页版协议） */
-    private fun buildBody(request: ConversationRequest): String {
+    /** 组装 backend-api/conversation 请求体（逆向自网页版协议）；internal 供 WebView 指纹通道复用 */
+    internal fun buildBody(request: ConversationRequest): String {
         val obj = JSONObject()
         obj.put("action", "next")
         obj.put("parent_message_id", UUID.randomUUID().toString())

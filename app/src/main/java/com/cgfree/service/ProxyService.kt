@@ -52,6 +52,8 @@ class ProxyService : Service() {
         createChannel()
         val notify = buildNotification("正在启动…")
         startForeground(NOTIFY_ID, notify)
+        // 预热 WebView 指纹对话引擎（隐藏 WebView 加载 chatgpt.com，首个对话请求免等待）
+        com.cgfree.net.WebViewChatEngine.ensure(applicationContext)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
