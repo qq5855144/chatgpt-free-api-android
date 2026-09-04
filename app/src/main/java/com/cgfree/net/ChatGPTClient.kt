@@ -11,7 +11,7 @@ import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 /**
- * ChatGPT 网页私有接口（chatgpt.com/backend-api/*）逆向调用客户端。
+ * ChatGPT 网页私有接口（chatgpt.com/backend-api）逆向调用客户端。
  *
  * - 使用网页登录得到的 accessToken 作为 Bearer 凭证；
  * - POST /backend-api/conversation 走 SSE 流式返回（事件流解析）；
