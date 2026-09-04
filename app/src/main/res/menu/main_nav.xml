@@ -9,6 +9,10 @@
         android:icon="@drawable/ic_server"
         android:title="API 服务" />
     <item
+        android:id="@+id/navDebug"
+        android:icon="@drawable/ic_debug"
+        android:title="调试" />
+    <item
         android:id="@+id/navAccount"
         android:icon="@drawable/ic_account"
         android:title="账号" />

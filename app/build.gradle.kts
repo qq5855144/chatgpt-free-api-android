@@ -51,6 +51,12 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0.0"
+
+        // 只保留 arm64-v8a：当前项目无原生 so 依赖，此配置用于锁定目标架构，
+        // 如需兼容 32 位设备请移除或追加 armeabi-v7a / x86_64
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     signingConfigs {

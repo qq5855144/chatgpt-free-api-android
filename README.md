@@ -21,6 +21,8 @@
 | App 内直接聊天 | 内置聊天 Tab，流式输出，多轮对话 |
 | 免费用官方免费模型 | 默认 gpt-4o-mini / gpt-4o / gpt-4.1 系列 / o3-mini，可自动拉取账号真实可用模型列表 |
 | 令牌过期自动续期 | 401/403 时用 Session Token 调 `/api/auth/session` 换取新 AccessToken |
+| 安装后实时自测 | 内置「调试」Tab：网络连通性 / 令牌校验 / 代理健康 / 模型列表 / 非流式 + 流式对话一键全链路自测 |
+| 构建架构 | 仅保留 arm64-v8a（`abiFilters`），安装包面向 64 位设备 |
 
 ## 工作原理
 
@@ -59,12 +61,12 @@
 ```bash
 git clone https://github.com/qq5855144/chatgpt-free-api-android.git
 # 用 Android Studio 打开，等待 Gradle Sync 完成后 Run ▶
-# 或命令行构建（需本机 Gradle 8.7+）
-gradle :app:assembleDebug
+# 或命令行构建（仓库已内置 gradle wrapper，自动下载 Gradle 8.7）
+./gradlew :app:assembleDebug
 # 产物: app/build/outputs/apk/debug/app-debug.apk
 ```
 
-> 未包含 gradle wrapper jar（二进制无法入库），Android Studio 打开时会自动处理；命令行请先执行 `gradle wrapper`。
+> 架构：`app/build.gradle.kts` 中已通过 `ndk.abiFilters` 锁定 **arm64-v8a**（当前无原生 so 依赖，纯字节码 APK 实际仍兼容各架构；如需 32 位设备可移除该配置）。
 
 ## 使用步骤
 
@@ -118,11 +120,27 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 
 > 手机 IP 在「API 服务」页会自动显示。多轮对话请由客户端携带完整 messages 历史（服务端按全量历史转发）。
 
+### 4. 安装后实时自测（调试 Tab）
+「调试」Tab 提供安装即用的全链路自测，无需电脑/抓包：
+
+| 按钮 | 验证内容 |
+|------|---------|
+| ▶ 一键全链路自测 | 自动依次执行下方全部单项（代理未启动会自动拉起） |
+| ① 网络连通性 | 探测 `chatgpt.com/cdn-cgi/trace`，区分「断网」与「风控拦截」 |
+| ② 令牌·模型列表 | 用保存的 accessToken 调官方 `/backend-api/models`，验证令牌有效性与账号可用模型 |
+| ③ 代理健康检查 | 本地代理 `GET /health` |
+| ④ 代理模型列表 | 本地代理 `GET /v1/models` |
+| ⑤ 对话·非流式 | 经本地代理真实发一条消息（stream=false） |
+| ⑥ 对话·流式(SSE) | 经本地代理真实发一条消息（stream=true），统计 SSE 块数 |
+
+状态卡实时显示登录态 / accessToken / sessionToken（脱敏）/ 代理运行状态，测试输出支持复制与清空。
+典型排查路径：① 不通 → 检查网络/VPN；② 失败 → 重新登录换令牌；③④ 失败 → 看「API 服务」页日志；⑤⑥ 失败但 ③④ 通过 → 多为上游限流或模型不可用，换模型重试。
+
 ## 目录结构
 
 ```
 app/src/main/java/com/cgfree/
-├── MainActivity.kt            # 三 Tab 主界面
+├── MainActivity.kt            # 四 Tab 主界面（聊天/API服务/调试/账号）
 ├── data/
 │   ├── Types.kt               # ChatMsg / ConversationRequest / 模型常量
 │   ├── TokenStore.kt          # Keystore 加密令牌存储
@@ -138,7 +156,8 @@ app/src/main/java/com/cgfree/
 │   ├── ChatAdapter.kt
 │   ├── AccountFragment.kt     # 令牌管理
 │   ├── LoginActivity.kt       # WebView 登录 + 令牌提取
-│   └── ServerFragment.kt      # API 服务开关/地址/日志
+│   ├── ServerFragment.kt      # API 服务开关/地址/日志
+│   └── DebugFragment.kt       # 调试自测（全链路一键验证）
 └── util/
     ├── LogBuffer.kt           # 运行日志环形缓冲
     └── TextAccumulator.kt     # SSE 快照→增量差分器

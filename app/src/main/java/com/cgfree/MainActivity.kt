@@ -11,6 +11,7 @@ import androidx.fragment.app.Fragment
 import com.cgfree.databinding.ActivityMainBinding
 import com.cgfree.ui.AccountFragment
 import com.cgfree.ui.ChatFragment
+import com.cgfree.ui.DebugFragment
 import com.cgfree.ui.ServerFragment
 
 class MainActivity : AppCompatActivity() {
@@ -48,6 +49,7 @@ class MainActivity : AppCompatActivity() {
         if (f == null) {
             f = when (id) {
                 R.id.navServer -> ServerFragment()
+                R.id.navDebug -> DebugFragment()
                 R.id.navAccount -> AccountFragment()
                 else -> ChatFragment()
             }
