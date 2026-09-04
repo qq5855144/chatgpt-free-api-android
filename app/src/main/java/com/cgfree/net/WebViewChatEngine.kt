@@ -518,8 +518,14 @@ object WebViewChatEngine {
               var t = last.innerText || last.textContent || '';
               return t.replace(/\u200b/g, '');
             }
+            function assistantCount() {
+              var nodes = document.querySelectorAll('[data-message-author-role="assistant"]');
+              return nodes ? nodes.length : 0;
+            }
             log('ui-start, msg-len=' + '__MSG__'.length);
             var pre = assistantText();
+            var preCount = assistantCount();
+            log('pre-text-len=' + pre.length + ' pre-assistant-count=' + preCount);
             // ---------- 输入函数化（typeText 同步无 await，可在重试中复用） ----------
             function typeText(inp) {
               if (!inp) return false;
@@ -615,24 +621,27 @@ object WebViewChatEngine {
               await new Promise(function(res){ setTimeout(res, 700); });
               loopCnt++;
               var cur = assistantText();
-              if (loopCnt % 10 === 0) {
+              var nodeCount = assistantCount();
+              var stopNow = findStopBtn();
+              // 新回复信号：assistant 节点数增长为主（回复文本与历史相同时长度不变，
+              // 仅靠文本长度无法识别新回复）；文本长度增长兜底（页面复用节点编辑场景）
+              var newReply = (nodeCount > preCount) || (cur.length > pre.length);
+              if (loopCnt % 10 === 0 || (newReply && stableCnt === 0)) {
                 var dbgBtn = findSendBtn();
-                log('loop#' + loopCnt + ' textLen=' + cur.length + ' stop=' + (findStopBtn() ? 'Y' : 'N') + ' sendBtn=' + (dbgBtn ? (dbgBtn.disabled ? 'disabled' : 'ok') : 'missing') + ' stable=' + stableCnt + ' retries=' + sendRetries);
+                log('loop#' + loopCnt + ' textLen=' + cur.length + ' nodes=' + nodeCount + '/' + preCount + ' stop=' + (stopNow ? 'Y' : 'N') + ' sendBtn=' + (dbgBtn ? (dbgBtn.disabled ? 'disabled' : 'ok') : 'missing') + ' stable=' + stableCnt + ' retries=' + sendRetries + ' new=' + (newReply ? 'Y' : 'N'));
               }
               if (cur !== lastText) {
                 lastText = cur;
                 lastChange = Date.now();
                 stableCnt = 0;
-                if (cur.length > pre.length) AndroidBridge.onEvent(cur);
-              } else if (cur.length > pre.length) {
-                stableCnt++;
+                if (newReply) AndroidBridge.onEvent(cur);
+              } else if (newReply) {
+                if (!stopNow) stableCnt++; else stableCnt = 0;
               }
               // 发送自愈：15s 无新回复且无生成中标记 → 重新输入+发送（最多 3 次）
-              var stopNow = findStopBtn();
-              var grown = cur.length > pre.length;
-              if (!grown && !stopNow && sendRetries < 3 && Date.now() - lastSendAt > 15000) {
+              if (!newReply && !stopNow && sendRetries < 3 && Date.now() - lastSendAt > 15000) {
                 sendRetries++;
-                log('resend #' + sendRetries + ' (textLen=' + cur.length + ')');
+                log('resend #' + sendRetries + ' (textLen=' + cur.length + ' nodes=' + nodeCount + '/' + preCount + ')');
                 var inp2 = findInput();
                 if (inp2) {
                   var c2 = ((inp2.isContentEditable === true) || (inp2.tagName === 'DIV')) ? (inp2.innerText || '') : (inp2.value || '');
@@ -654,15 +663,15 @@ object WebViewChatEngine {
                 lastSendAt = Date.now();
               }
               var sendBtn2 = findSendBtn();
-              var done = !stopNow && grown && sendBtn2 && !sendBtn2.disabled;
+              var done = !stopNow && newReply && sendBtn2 && !sendBtn2.disabled;
               if (done) { finish(cur); return; }
-              if (!stopNow && grown && stableCnt >= 5) { finish(cur); return; }
+              if (!stopNow && newReply && stableCnt >= 5) { finish(cur); return; }
               if (Date.now() - t0 > timeoutMs) {
-                AndroidBridge.onError(0, 'UI 对话等待超时 240s（最后文本长度=' + cur.length + '，可能页面出现错误提示/验证）');
+                AndroidBridge.onError(0, 'UI 对话等待超时 240s（最后文本长度=' + cur.length + ' 节点=' + nodeCount + '/' + preCount + '，可能页面出现错误提示/验证）');
                 return;
               }
-              if (Date.now() - lastChange > 90000 && cur.length > pre.length) {
-                AndroidBridge.onError(0, 'UI 对话输出停滞 90s（最后文本长度=' + cur.length + '）');
+              if (Date.now() - lastChange > 90000 && newReply) {
+                AndroidBridge.onError(0, 'UI 对话输出停滞 90s（最后文本长度=' + cur.length + ' 节点=' + nodeCount + '/' + preCount + '）');
                 return;
               }
             }
