@@ -53,8 +53,8 @@ android {
         applicationId = "com.cgfree"
         minSdk = 26
         targetSdk = 34
-        versionCode = 10
-        versionName = "1.0.10"
+        versionCode = 11
+        versionName = "1.0.11"
 
         // 只保留 arm64-v8a：当前项目无原生 so 依赖，此配置用于锁定目标架构，
         // 如需兼容 32 位设备请移除或追加 armeabi-v7a / x86_64

@@ -13,6 +13,7 @@ import fi.iki.elonen.NanoHTTPD
 import okhttp3.OkHttpClient
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
 import java.util.UUID
@@ -38,6 +39,7 @@ class ProxyServer(
     companion object {
         private var modelsCache: Pair<Long, List<String>>? = null
         private const val MODELS_TTL_MS = 10 * 60 * 1000L
+        private const val MAX_REQUEST_BODY_BYTES = 4 * 1024 * 1024
     }
 
     override fun serve(session: IHTTPSession): Response {
@@ -168,6 +170,9 @@ class ProxyServer(
             val m = msgsArr.optJSONObject(i) ?: continue
             val role = m.optString("role", "user")
             val content = extractText(m.opt("content")) ?: continue
+            if ('\uFFFD' in content) {
+                return jsonError(400, "请求消息包含乱码替换字符（�）：请确认聊天客户端以 UTF-8 发送 JSON")
+            }
             chatMsgs.add(ChatMsg(role, content))
         }
         if (chatMsgs.isEmpty()) return jsonError(400, "messages 中没有可用的文本内容")
@@ -185,12 +190,51 @@ class ProxyServer(
     }
 
     /**
-     * 读取请求体：走 NanoHTTPD 官方 parseBody（非表单 content-type 的 body 存入 files["postData"]）。
-     * 不能直接 session.inputStream.readBytes()：NanoHTTPD 不会按 Content-Length 截断输入流，
-     * 对 keep-alive 连接 readBytes() 会一直阻塞到客户端断开——表现为请求 60~120s 后才开始执行
-     * （实为客户端读超时断开连接的时刻），客户端早已超时，表现为“⑤ 跑不通”。
+     * 严格按 HTTP 字节读取 JSON 并统一以 UTF-8 解码。
+     *
+     * NanoHTTPD parseBody() 会依据 Content-Type 中声明的 charset 转成 String；部分 OpenAI
+     * 客户端只发送 application/json 而不附 charset，中文可能先被错误解码成 �。这里按
+     * Content-Length 精确读取（不会等待 keep-alive 连接 EOF），从源头保留中文与 emoji。
      */
     private fun readBody(session: IHTTPSession): String {
+        val length = session.headers["content-length"]?.toLongOrNull()
+        if (length != null) {
+            if (length <= 0L) return ""
+            if (length > MAX_REQUEST_BODY_BYTES) {
+                throw IllegalArgumentException("请求体过大：$length bytes（上限 $MAX_REQUEST_BODY_BYTES）")
+            }
+            val bytes = ByteArray(length.toInt())
+            var offset = 0
+            while (offset < bytes.size) {
+                val count = session.inputStream.read(bytes, offset, bytes.size - offset)
+                if (count < 0) break
+                if (count == 0) continue
+                offset += count
+            }
+            if (offset != bytes.size) {
+                LogBuffer.log("请求体不完整：Content-Length=${bytes.size}，实际读取=$offset")
+            }
+            return String(bytes, 0, offset, Charsets.UTF_8)
+        }
+
+        // HTTP/1.1 chunked 请求没有 Content-Length；NanoHTTPD 已负责解除分块，按 EOF
+        // 读取并设置大小上限。普通 keep-alive 请求不会走到这个分支。
+        if (session.headers["transfer-encoding"]?.contains("chunked", ignoreCase = true) == true) {
+            val out = ByteArrayOutputStream()
+            val buffer = ByteArray(8192)
+            while (true) {
+                val count = session.inputStream.read(buffer)
+                if (count < 0) break
+                if (count == 0) continue
+                if (out.size() + count > MAX_REQUEST_BODY_BYTES) {
+                    throw IllegalArgumentException("请求体过大（上限 $MAX_REQUEST_BODY_BYTES bytes）")
+                }
+                out.write(buffer, 0, count)
+            }
+            return out.toString(Charsets.UTF_8.name())
+        }
+
+        // 极少数非标准客户端既不发 Content-Length 也不使用 chunked，保留兼容回退。
         val files = java.util.HashMap<String, String>()
         try {
             session.parseBody(files)
@@ -208,7 +252,11 @@ class ProxyServer(
             for (i in 0 until content.length()) {
                 val part = content.opt(i)
                 if (part is String) sb.append(part)
-                else if (part is JSONObject && part.optString("type") == "text") sb.append(part.optString("text"))
+                else if (part is JSONObject) {
+                    when (part.optString("type")) {
+                        "text", "input_text", "output_text" -> sb.append(part.optString("text"))
+                    }
+                }
             }
             sb.toString().takeIf { it.isNotBlank() }
         }
