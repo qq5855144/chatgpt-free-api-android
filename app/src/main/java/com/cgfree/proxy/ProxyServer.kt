@@ -200,7 +200,10 @@ class ProxyServer(
                         LogBuffer.log("WebView 通道已自动刷新 accessToken")
                     }
                 },
-                onEvent = onEvent
+                onEvent = onEvent,
+                // UI 自动化优先：真实操作页面输入框+发送按钮，由 OpenAI 页面 JS 完成全部
+                // 风控（裸 fetch 已被证实 403）；引擎不可用/超时由 chatBlocking 返回 false 回退
+                useUi = true
             )
         } catch (e: Exception) {
             LogBuffer.log("WebView 通道异常，回退 OkHttp: ${e.message}")
