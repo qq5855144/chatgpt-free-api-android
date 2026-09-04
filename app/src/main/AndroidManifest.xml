@@ -12,7 +12,10 @@
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
-        android:theme="@style/Theme.ChatGPTFree">
+        android:theme="@style/Theme.ChatGPTFree"
+        android:usesCleartextTraffic="true">
+        <!-- usesCleartextTraffic=true：允许 App 内调试自测访问本地反代 http://127.0.0.1:8787
+             （Android 9+ 默认禁止明文 HTTP；上游 chatgpt.com 仍为 HTTPS 不受影响） -->
 
         <activity
             android:name=".MainActivity"

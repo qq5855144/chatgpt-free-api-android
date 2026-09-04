@@ -51,6 +51,13 @@ class DebugFragment : Fragment() {
 
     private val sb = StringBuilder()
 
+    /** 网络探测专用短超时客户端（避免单端点卡 45s） */
+    private val netHttp: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .writeTimeout(10, TimeUnit.SECONDS)
+        .build()
+
     /** 账号真实可用模型缓存（fetchModels 一次成功即复用，供对话测试选真实模型） */
     private var cachedModels: List<String>? = null
 
@@ -164,17 +171,29 @@ class DebugFragment : Fragment() {
 
     // ---------- 上游测试 ----------
 
-    /** ① 网络连通性：探测 chatgpt.com（到达 CDN 即视为网络可达，403 属风控挡页而非断网） */
+    /** ① 网络连通性：优先探测真实业务端点 backend-api（无 token 时预期 401/403 = 网络通），
+     *  cdn-cgi/trace 仅作兜底（该端点可能被部分网络环境限速导致误报） */
     private fun testNet() {
+        // 探测 1：业务端点（与令牌校验同路径，最贴近真实使用）
         try {
-            val req = Request.Builder().url("https://chatgpt.com/cdn-cgi/trace").get().build()
-            http.newCall(req).execute().use { resp ->
-                val body = resp.body?.string().orEmpty().take(200)
-                log("✓ 已连通 chatgpt.com，HTTP ${resp.code}")
-                if (body.isNotBlank()) log("响应片段：${body.replace('\n', ' ')}")
+            val req = Request.Builder().url("${ChatGPTClient.WEB_BASE}/backend-api/models").get().build()
+            netHttp.newCall(req).execute().use { resp ->
+                // 无 token 访问预期 401/403，只要 HTTP 响应到达即代表网络连通
+                log("✓ 已连通 chatgpt.com（backend-api 可达，HTTP ${resp.code}）")
+                return
             }
         } catch (e: Exception) {
-            log("✗ 无法访问 chatgpt.com：${e.message}")
+            log("✗ backend-api 探测失败：${e.message}")
+        }
+        // 探测 2：兜底 cdn-cgi/trace
+        try {
+            val req = Request.Builder().url("${ChatGPTClient.WEB_BASE}/cdn-cgi/trace").get().build()
+            netHttp.newCall(req).execute().use { resp ->
+                log("✓ cdn-cgi/trace 可达（HTTP ${resp.code}）")
+                return
+            }
+        } catch (e: Exception) {
+            log("✗ chatgpt.com 无法访问：${e.message}")
             log("  提示：当前网络可能无法直连 ChatGPT，请检查网络/代理/VPN 后重试")
         }
     }
