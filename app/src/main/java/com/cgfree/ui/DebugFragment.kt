@@ -79,7 +79,8 @@ class DebugFragment : Fragment() {
         b.btnModels.setOnClickListener { queue("代理模型列表") { testModels() } }
         b.btnChatSync.setOnClickListener { queue("对话·非流式") { testChat(stream = false) } }
         b.btnChatStream.setOnClickListener { queue("对话·流式") { testChat(stream = true) } }
-        b.btnChatWebview.setOnClickListener { queue("WebView对话·指纹直连") { testChatWebview() } }
+        b.btnChatWebview.setOnClickListener { queue("WebView对话·指纹直连") { testChatWebview(useUi = false) } }
+        b.btnChatWebviewUi.setOnClickListener { queue("WebView对话·页面UI自动化") { testChatWebview(useUi = true) } }
         b.btnCopyLog.setOnClickListener { copyLog() }
         b.btnClearLog.setOnClickListener { clearLog() }
         refreshStatus()
@@ -387,18 +388,30 @@ class DebugFragment : Fragment() {
         }
     }
 
-    /** ⑦ WebView 指纹通道直连上游对话（不经本地代理与 OkHttp）——验证 Chromium 网络栈能否绕过设备指纹风控 */
-    private fun testChatWebview() {
+    /** ⑦⑧ WebView 通道直连上游对话（不经本地代理与 OkHttp）
+     *  useUi=false → 裸 fetch /backend-api/conversation（指纹通道，可能被 403）
+     *  useUi=true  → 页面 UI 自动化（真实操作输入框+发送，页面自身 JS 完成全部风控，最接近手动对话） */
+    private fun testChatWebview(useUi: Boolean) {
         val model = pickChatModel()
         val ctx = requireContext()
+        val msg = if (useUi) {
+            "这是一条页面 UI 自动化自测消息，请只回复：PONG"
+        } else {
+            "这是一条 WebView 指纹通道自测消息，请只回复：PONG"
+        }
         val req = ConversationRequest(
             model = model,
-            messages = listOf(ChatMsg("user", "这是一条 WebView 指纹通道自测消息，请只回复：PONG")),
+            messages = listOf(ChatMsg("user", msg)),
             conversationId = null,
             historyAndTrainingDisabled = true
         )
-        log("→ WebView 指纹通道直连 chatgpt.com（model=$model）…")
-        log("  首次运行需加载隐藏页面（约 5-20s），此后复用同一 Chromium 会话")
+        if (useUi) {
+            log("→ WebView 页面 UI 自动化直连 chatgpt.com（model=$model）…")
+            log("  引擎将自动在隐藏页面输入消息并点击发送，由 OpenAI 页面 JS 完成全部风控（等价于手动对话）")
+        } else {
+            log("→ WebView 指纹通道直连 chatgpt.com（model=$model）…")
+            log("  首次运行需加载隐藏页面（约 5-20s），此后复用同一 Chromium 会话")
+        }
         val t0 = System.currentTimeMillis()
         val sb = StringBuilder()
         val acc = com.cgfree.util.TextAccumulator()
@@ -428,7 +441,8 @@ class DebugFragment : Fragment() {
                     is ChatGPTClient.Event.Error -> err = ev.message
                     else -> { /* ignore */ }
                 }
-            }
+            },
+            useUi = useUi
         )
         if (!ok) {
             log("✗ WebView 通道不可用（引擎初始化失败/首页加载超时），已回退 OkHttp——本项无法验证指纹通道")
@@ -440,7 +454,7 @@ class DebugFragment : Fragment() {
             log("  提示：若为 403 Unusual activity → 当前 IP 已被标记，请换网络/冷却；若为 401/会话失效 → 重新登录")
             return
         }
-        log(if (out.isBlank()) "✗ 空响应（无任何输出）" else "✓ WebView 指纹通道响应成功（${(System.currentTimeMillis() - t0) / 1000}s，$chunks 个事件）：")
+        log(if (out.isBlank()) "✗ 空响应（无任何输出）" else "✓ WebView ${if (useUi) "UI自动化" else "指纹"}通道响应成功（${(System.currentTimeMillis() - t0) / 1000}s，$chunks 个事件）：")
         if (out.isNotBlank()) log(out)
     }
 

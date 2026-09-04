@@ -146,6 +146,19 @@
                     android:textSize="11sp"
                     android:text="⑦ WebView对话·指纹直连（绕过设备指纹风控验证）" />
             </LinearLayout>
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:layout_marginBottom="4dp"
+                android:orientation="horizontal">
+                <Button
+                    android:id="@+id/btnChatWebviewUi"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textSize="11sp"
+                    android:text="⑧ WebView对话·页面UI自动化（真实操作页面输入框发送）" />
+            </LinearLayout>
         </LinearLayout>
     </ScrollView>
 

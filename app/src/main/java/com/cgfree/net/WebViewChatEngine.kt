@@ -4,12 +4,16 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
+import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import com.cgfree.BuildConfig
 import com.cgfree.data.ConversationRequest
 import com.cgfree.util.LogBuffer
 import java.util.UUID
@@ -58,7 +62,8 @@ object WebViewChatEngine {
     private class Session(
         val request: ConversationRequest,
         val onEvent: (ChatGPTClient.Event) -> Unit,
-        val onToken: (String) -> Unit
+        val onToken: (String) -> Unit,
+        val useUi: Boolean = false
     ) {
         val done = CountDownLatch(1)
         private var finished = false
@@ -115,6 +120,20 @@ object WebViewChatEngine {
                 w.settings.domStorageEnabled = true
                 w.settings.databaseEnabled = true
                 w.settings.cacheMode = WebSettings.LOAD_DEFAULT
+                // debug 构建开启远程调试（chrome://inspect），并把页面 JS console 转发到 logcat/调试日志
+                if (BuildConfig.DEBUG) {
+                    WebView.setWebContentsDebuggingEnabled(true)
+                }
+                w.webChromeClient = object : WebChromeClient() {
+                    override fun onConsoleMessage(msg: ConsoleMessage?): Boolean {
+                        if (msg != null && msg.message().isNotBlank()) {
+                            val line = "[JS:${msg.messageLevel()}] ${msg.message()} @${msg.sourceId()}:${msg.lineNumber()}"
+                            LogBuffer.log(line)
+                            Log.i("CGFREE_JS", line)
+                        }
+                        return true
+                    }
+                }
                 // 去掉 "; wv" 标识，使 UA 与普通 Chrome 完全一致（登录 WebView 同款处理）
                 w.settings.userAgentString = w.settings.userAgentString.replace("; wv", "")
                 w.addJavascriptInterface(object {
@@ -123,20 +142,22 @@ object WebViewChatEngine {
                         val s = running ?: return
                         if (token.isNotBlank()) s.onToken(token)
                     }
-
                     @JavascriptInterface
                     fun onEvent(snapshot: String) {
                         running?.push(snapshot)
                     }
-
                     @JavascriptInterface
                     fun onDone() {
                         running?.finish()
                     }
-
                     @JavascriptInterface
                     fun onError(status: Int, message: String) {
                         running?.fail(if (status == 0) null else status, message)
+                    }
+                    @JavascriptInterface
+                    fun onLog(msg: String) {
+                        LogBuffer.log("[WV-UI] $msg")
+                        Log.i("CGFREE_JS", msg)
                     }
                 }, "AndroidBridge")
                 w.webViewClient = object : WebViewClient() {
@@ -195,7 +216,8 @@ object WebViewChatEngine {
         onEvent: (ChatGPTClient.Event) -> Unit,
         onToken: (String) -> Unit = {},
         readyTimeoutMs: Long = 30_000,
-        chatTimeoutMs: Long = 300_000
+        chatTimeoutMs: Long = 300_000,
+        useUi: Boolean = false
     ): Boolean {
         // 本方法会阻塞等待 WebView JS 回调；JS 回调依赖主线程消息循环，
         // 若在主线程调用将互相等待直到超时，故禁止。
@@ -210,7 +232,7 @@ object WebViewChatEngine {
         }
         if (wv == null) return false
 
-        val session = Session(request, onEvent, onToken)
+        val session = Session(request, onEvent, onToken, useUi)
         main.post {
             queue.addLast(session)
             pump()
@@ -239,15 +261,18 @@ object WebViewChatEngine {
             return
         }
         try {
-            w.evaluateJavascript(buildJs(s.request), null)
+            w.evaluateJavascript(buildJs(s.request, s.useUi), null)
         } catch (e: Exception) {
             running = null
             s.fail(null, "WebView 执行失败: ${e.message}")
         }
     }
-
     /** 组装在 chatgpt.com 同源页面内执行的对话 JS（fetch → SSE 解析 → 回调） */
-    private fun buildJs(request: ConversationRequest): String {
+    private fun buildJs(request: ConversationRequest, useUi: Boolean): String {
+        if (useUi) {
+            val text = lastUserText(request)
+            return JS_TEMPLATE_UI.replace("__MSG__", jsStr(text))
+        }
         val payload = ChatGPTClient.buildBody(request)
         // 注入到 JS 单引号字符串：转义反斜杠与单引号（JSON 本身无换行）
         val body = payload.replace("\\", "\\\\").replace("'", "\\'")
@@ -256,6 +281,20 @@ object WebViewChatEngine {
             .replace("__BUILD_ID__", buildId)
             .replace("__BODY__", body)
     }
+    /** 取最后一条 user 消息纯文本（UI 自动化需要打字进输入框） */
+    private fun lastUserText(request: ConversationRequest): String {
+        for (i in request.messages.indices.reversed()) {
+            val m = request.messages[i]
+            if (m.role == "user" && m.content.isNotBlank()) return m.content
+        }
+        return request.messages.lastOrNull()?.content ?: "hi"
+    }
+    /** JS 单引号字符串转义（含换行 → \\n） */
+    private fun jsStr(s: String): String = s
+        .replace("\\", "\\\\")
+        .replace("'", "\\'")
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")
 
     /** JS→Kotlin 桥说明：addJavascriptInterface 使用匿名 object 实现（方法自动在主线程回调） */
 
@@ -336,6 +375,120 @@ object WebViewChatEngine {
               }
             }
             AndroidBridge.onDone();
+          } catch(e) {
+            AndroidBridge.onError(0, String((e && e.message) || e));
+}
+        })();
+    """.trimIndent()
+    /**
+     * UI 自动化对话 JS：直接操作 chatgpt.com 页面原生输入框与发送按钮，
+     * 由 OpenAI 页面自身 JS 完成全部风控流程（proof-of-work/sentinel/Arkose/内部 header），
+     * 再用轮询读取最后一条 assistant 消息 DOM 文本，逐帧回调全文快照。
+     * 这是与"用户手动在浏览器对话" 100% 等价的路径，用于绕过裸 fetch 被识破的 403。
+     * 注意：本模板不允许出现 $ 字符（Kotlin raw string 插值冲突）。
+     */
+    private val JS_TEMPLATE_UI = """
+        (async function(){
+          var log = function(m){ try { AndroidBridge.onLog(m); } catch(e){} };
+          try {
+            function setNativeValue(el, value) {
+              var proto = Object.getPrototypeOf(el);
+              var desc = Object.getOwnPropertyDescriptor(proto, 'value');
+              if (desc && desc.set) desc.set.call(el, value);
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+            function findInput() {
+              var q = document.querySelector('textarea#prompt-textarea');
+              if (q) return q;
+              q = document.querySelector('div#prompt-textarea');
+              if (q) return q;
+              q = document.querySelector('textarea[placeholder]');
+              if (q) return q;
+              q = document.querySelector('[contenteditable="true"]');
+              return q;
+            }
+            function findSendBtn() {
+              var b = document.querySelector('button[data-testid="send-button"]');
+              if (b) return b;
+              b = document.querySelector('button[aria-label="Send prompt"]');
+              if (b) return b;
+              b = document.querySelector('button[aria-label*="发送"]');
+              return b;
+            }
+            function findStopBtn() {
+              return document.querySelector('button[data-testid="stop-button"]');
+            }
+            function assistantText() {
+              var nodes = document.querySelectorAll('[data-message-author-role="assistant"]');
+              if (!nodes || !nodes.length) return '';
+              var last = nodes[nodes.length - 1];
+              if (!last) return '';
+              var t = last.innerText || last.textContent || '';
+              return t.replace(/\u200b/g, '');
+            }
+            log('ui-start, msg-len=' + '__MSG__'.length);
+            var pre = assistantText();
+            var input = findInput();
+            if (!input) {
+              AndroidBridge.onError(0, '页面未找到输入框（chatgpt.com DOM 结构可能变化或未进入可对话状态）');
+              return;
+            }
+            log('input-found: ' + input.tagName + '#' + (input.id || ''));
+            input.focus();
+            var isContentEditable = (input.isContentEditable === true) || (input.tagName === 'DIV');
+            if (isContentEditable) {
+              var sel = window.getSelection();
+              sel.removeAllRanges();
+              var range = document.createRange();
+              range.selectNodeContents(input);
+              sel.addRange(range);
+              document.execCommand('insertText', false, '__MSG__');
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+            } else {
+              setNativeValue(input, '__MSG__');
+            }
+            await new Promise(function(res){ setTimeout(res, 600); });
+            log('input-value-len=' + (input.value ? input.value.length : -1) + ' ce=' + isContentEditable);
+            var btn = findSendBtn();
+            if (btn && !btn.disabled) {
+              btn.click();
+              log('send-by-click');
+            } else {
+              log('send-btn=' + (btn ? 'disabled' : 'missing') + ', fallback-enter');
+              var ev = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true });
+              input.dispatchEvent(ev);
+              input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+            }
+            var t0 = Date.now();
+            var lastText = pre;
+            var lastChange = t0;
+            var timeoutMs = 240000;
+            for (;;) {
+              await new Promise(function(res){ setTimeout(res, 700); });
+              var cur = assistantText();
+              if (cur !== lastText) {
+                lastText = cur;
+                lastChange = Date.now();
+                if (cur.length > pre.length) AndroidBridge.onEvent(cur);
+              }
+              var stop = findStopBtn();
+              var sendBtn = findSendBtn();
+              var done = !stop && cur.length > pre.length && sendBtn && !sendBtn.disabled;
+              if (done) {
+                AndroidBridge.onEvent(cur);
+                log('ui-done, len=' + cur.length + ', cost=' + ((Date.now() - t0) / 1000).toFixed(1) + 's');
+                AndroidBridge.onDone();
+                return;
+              }
+              if (Date.now() - t0 > timeoutMs) {
+                AndroidBridge.onError(0, 'UI 对话等待超时 240s（最后文本长度=' + cur.length + '，可能页面出现错误提示/验证）');
+                return;
+              }
+              if (Date.now() - lastChange > 90000 && cur.length > pre.length) {
+                AndroidBridge.onError(0, 'UI 对话输出停滞 90s（最后文本长度=' + cur.length + '）');
+                return;
+              }
+            }
           } catch(e) {
             AndroidBridge.onError(0, String((e && e.message) || e));
           }
