@@ -507,30 +507,36 @@ object WebViewChatEngine {
             var t0 = Date.now();
             var lastText = pre;
             var lastChange = t0;
+            var stableCnt = 0;
             var timeoutMs = 240000;
             var loopCnt = 0;
+            function finish(cur) {
+              AndroidBridge.onEvent(cur);
+              log('ui-done, len=' + cur.length + ', cost=' + ((Date.now() - t0) / 1000).toFixed(1) + 's');
+              AndroidBridge.onDone();
+            }
             for (;;) {
               await new Promise(function(res){ setTimeout(res, 700); });
               loopCnt++;
               var cur = assistantText();
               if (loopCnt % 10 === 0) {
                 var dbgBtn = findSendBtn();
-                log('loop#' + loopCnt + ' textLen=' + cur.length + ' stop=' + (findStopBtn() ? 'Y' : 'N') + ' sendBtn=' + (dbgBtn ? (dbgBtn.disabled ? 'disabled' : 'ok') : 'missing'));
+                log('loop#' + loopCnt + ' textLen=' + cur.length + ' stop=' + (findStopBtn() ? 'Y' : 'N') + ' sendBtn=' + (dbgBtn ? (dbgBtn.disabled ? 'disabled' : 'ok') : 'missing') + ' stable=' + stableCnt);
               }
               if (cur !== lastText) {
                 lastText = cur;
                 lastChange = Date.now();
+                stableCnt = 0;
                 if (cur.length > pre.length) AndroidBridge.onEvent(cur);
+              } else if (cur.length > pre.length) {
+                stableCnt++;
               }
               var stop = findStopBtn();
               var sendBtn = findSendBtn();
-              var done = !stop && cur.length > pre.length && sendBtn && !sendBtn.disabled;
-              if (done) {
-                AndroidBridge.onEvent(cur);
-                log('ui-done, len=' + cur.length + ', cost=' + ((Date.now() - t0) / 1000).toFixed(1) + 's');
-                AndroidBridge.onDone();
-                return;
-              }
+              var textGrown = cur.length > pre.length;
+              // 完成判定双路径：1) sendBtn 可用（TEXTAREA 形态按钮常驻仅 disabled 切换） 2) 无 stop 且文本连续稳定 5 轮（约 3.5s，DIV 形态发送后按钮被移出 DOM 导致 sendBtn=missing）
+              if (!stop && textGrown && sendBtn && !sendBtn.disabled) { finish(cur); return; }
+              if (!stop && textGrown && stableCnt >= 5) { finish(cur); return; }
               if (Date.now() - t0 > timeoutMs) {
                 AndroidBridge.onError(0, 'UI 对话等待超时 240s（最后文本长度=' + cur.length + '，可能页面出现错误提示/验证）');
                 return;
