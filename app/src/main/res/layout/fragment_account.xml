@@ -131,5 +131,4 @@
             android:textSize="12sp"
             android:text="令牌保存于本机 Keystore 加密存储。\n\n获取方法（电脑浏览器）：\n1. 登录 chatgpt.com，随便发一条消息；\n2. F12 → Application → Local Storage → https://chatgpt.com，复制 accessToken 的 value；\n3. F12 → Application → Cookies → https://chatgpt.com，复制 __Secure-next-auth.session-token 的 value；\n4. 建议同页面复制全部 Cookie（Application → Cookies → 双击 cookie 行复制或导出）。\n\n注意：令牌即账号凭证，复制/分享等于交出账号，请勿泄露；网页登录方式可能遇到 Cloudflare 验证，失败时请用上方手动粘贴方式。逆向接口有账号风控风险，仅供学习自用。" />
     </LinearLayout>
-    </LinearLayout>
 </ScrollView>
