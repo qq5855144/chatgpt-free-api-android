@@ -11,7 +11,6 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.Toast
 import androidx.fragment.app.Fragment
-import com.cgfree.BuildConfig
 import com.cgfree.data.Prefs
 import com.cgfree.data.TokenStore
 import com.cgfree.databinding.FragmentDebugBinding
@@ -100,7 +99,7 @@ class DebugFragment : Fragment() {
             "已登录${if (!email.isNullOrBlank()) "（$email）" else ""}"
         } else "未登录（请先到「账号」页登录/粘贴令牌）"
         b.debugStatus.text = buildString {
-            append("版本：v").append(BuildConfig.VERSION_NAME).append('\n')
+            append("版本：").append(appVersionName(requireContext())).append('\n')
             append("登录：").append(loginState).append('\n')
             append("accessToken：").append(mask(acc)).append('\n')
             append("sessionToken：").append(mask(sess)).append('\n')
@@ -114,6 +113,13 @@ class DebugFragment : Fragment() {
     private fun mask(t: String?): String {
         if (t.isNullOrBlank()) return "（无）"
         return if (t.length <= 10) "***（过短，可能无效）" else "${t.take(8)}…${t.takeLast(4)}（长度 ${t.length}）"
+    }
+
+    /** 通过 PackageManager 读取当前安装包版本名（避免依赖 BuildConfig 生成开关） */
+    private fun appVersionName(ctx: Context): String = try {
+        "v" + ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName
+    } catch (e: Exception) {
+        "?"
     }
 
     private fun log(line: String) {
