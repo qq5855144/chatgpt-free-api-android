@@ -42,10 +42,10 @@ class DebugFragment : Fragment() {
     /** 串行执行队列：多次点击排队执行，避免并发请求互相干扰 */
     private val worker = Executors.newSingleThreadExecutor()
 
-    /** 本地调试用短超时客户端（避免单项测试长时间挂起） */
+    /** 本地调试用客户端（90s：gpt-5 思考模型完整生成可能需要较久，45s 过短易误判） */
     private val http: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(45, TimeUnit.SECONDS)
+        .readTimeout(90, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
@@ -327,42 +327,56 @@ class DebugFragment : Fragment() {
         val t0 = System.currentTimeMillis()
         log(if (stream) "→ POST /v1/chat/completions（stream=true, model=$model）…" else "→ POST /v1/chat/completions（stream=false, model=$model）…")
 
-        http.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) {
-                log("✗ HTTP ${resp.code}: ${resp.body?.string().orEmpty().take(300)}")
-                return
-            }
-            if (!stream) {
-                val text = resp.body?.string().orEmpty()
-                val j = runCatching { JSONObject(text) }.getOrNull()
-                val content = j?.optJSONArray("choices")?.optJSONObject(0)
-                    ?.optJSONObject("message")?.optString("content") ?: text.take(300)
-                log("✓ 非流式响应（${(System.currentTimeMillis() - t0) / 1000}s）：")
-                log(content)
-                val usage = j?.optJSONObject("usage")
-                if (usage != null) log("usage: ${usage.toString()}")
-            } else {
-                // 流式：逐行读 SSE data:，拼接 delta
-                val source = resp.body?.source() ?: throw RuntimeException("empty body")
-                val collected = StringBuilder()
-                var chunks = 0
-                while (true) {
-                    val line = source.readUtf8Line() ?: break
-                    if (!line.startsWith("data:")) continue
-                    val data = line.removePrefix("data:").trim()
-                    if (data == "[DONE]") break
-                    val j = runCatching { JSONObject(data) }.getOrNull() ?: continue
-                    val delta = j.optJSONArray("choices")?.optJSONObject(0)
-                        ?.optJSONObject("delta")?.optString("content") ?: ""
-                    if (delta.isNotEmpty()) {
-                        collected.append(delta)
-                        chunks++
-                    }
+        try {
+            http.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    log("✗ HTTP ${resp.code}: ${resp.body?.string().orEmpty().take(300)}")
+                    dumpProxyLog()
+                    return
                 }
-                log("✓ 流式响应（${(System.currentTimeMillis() - t0) / 1000}s，$chunks 个 SSE 块）：")
-                log(collected.toString().ifBlank { "（空响应）" })
+                if (!stream) {
+                    val text = resp.body?.string().orEmpty()
+                    val j = runCatching { JSONObject(text) }.getOrNull()
+                    val content = j?.optJSONArray("choices")?.optJSONObject(0)
+                        ?.optJSONObject("message")?.optString("content") ?: text.take(300)
+                    log("✓ 非流式响应（${(System.currentTimeMillis() - t0) / 1000}s）：")
+                    log(content)
+                    val usage = j?.optJSONObject("usage")
+                    if (usage != null) log("usage: ${usage.toString()}")
+                } else {
+                    // 流式：逐行读 SSE data:，拼接 delta
+                    val source = resp.body?.source() ?: throw RuntimeException("empty body")
+                    val collected = StringBuilder()
+                    var chunks = 0
+                    while (true) {
+                        val line = source.readUtf8Line() ?: break
+                        if (!line.startsWith("data:")) continue
+                        val data = line.removePrefix("data:").trim()
+                        if (data == "[DONE]") break
+                        val j = runCatching { JSONObject(data) }.getOrNull() ?: continue
+                        val delta = j.optJSONArray("choices")?.optJSONObject(0)
+                            ?.optJSONObject("delta")?.optString("content") ?: ""
+                        if (delta.isNotEmpty()) {
+                            collected.append(delta)
+                            chunks++
+                        }
+                    }
+                    log("✓ 流式响应（${(System.currentTimeMillis() - t0) / 1000}s，$chunks 个 SSE 块）：")
+                    log(collected.toString().ifBlank { "（空响应）" })
+                }
             }
+        } catch (e: Exception) {
+            log("✗ 请求异常：${e.message ?: e.javaClass.simpleName}")
+            dumpProxyLog()
         }
+    }
+
+    /** 失败时自动附上「API 服务」页代理日志尾部，便于一次性定位（无需手动切页复制） */
+    private fun dumpProxyLog() {
+        val lines = com.cgfree.util.LogBuffer.snapshot().lines().takeLast(15)
+        if (lines.isEmpty()) return
+        log("──── 代理日志（尾部）────")
+        lines.forEach { log(it) }
     }
 
     /** 一键全链路自测：令牌 → 网络 → 代理(自愈) → 健康 → 模型 → 非流式 → 流式 */

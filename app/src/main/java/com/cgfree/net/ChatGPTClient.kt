@@ -3,6 +3,7 @@ package com.cgfree.net
 import com.cgfree.data.ConversationRequest
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.RequestBody
 import org.json.JSONArray
@@ -49,6 +50,15 @@ object ChatGPTClient {
         .readTimeout(5, TimeUnit.MINUTES)
         .writeTimeout(5, TimeUnit.MINUTES)
         .callTimeout(10, TimeUnit.MINUTES)
+        .build()
+
+    /** HTTP/1.1 专用客户端（同超时）：部分中间网络对 HTTP/2 SSE 长连接处理异常（黑洞/掐断），降级 1.1 可绕开 */
+    fun newHttp11Client(): OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(5, TimeUnit.MINUTES)
+        .writeTimeout(5, TimeUnit.MINUTES)
+        .callTimeout(10, TimeUnit.MINUTES)
+        .protocols(listOf(Protocol.HTTP_1_1))
         .build()
 
     /** 拉取当前账号可用模型列表 */
@@ -113,11 +123,14 @@ object ChatGPTClient {
             guard(Event.Error(e.message ?: "请求失败", e.status))
         } catch (e: Exception) {
             // 瞬时网络异常（上游偶发挂起/断流）且尚未输出任何内容：静默重试一次
+            // 第二次尝试强制降级 HTTP/1.1——部分中间网络对 HTTP/2 SSE 长连接处理异常（黑洞），1.1 可绕开
             val retryable = !emitted && (e is java.net.SocketTimeoutException || e is java.io.IOException)
             if (retryable) {
+                com.cgfree.util.LogBuffer.log("上游无响应（${e.message}），1.5s 后降级 HTTP/1.1 重试…")
                 try {
                     Thread.sleep(1500)
-                    runOnce(token, request, guard, client)
+                    val retryClient = if (client.protocols.contains(Protocol.HTTP_2)) newHttp11Client() else client
+                    runOnce(token, request, guard, retryClient)
                     return
                 } catch (e2: Exception) {
                     guard(Event.Error(describe(e2), (e2 as? ApiException)?.status))
