@@ -51,7 +51,12 @@ class ChatFragment : Fragment() {
         b.modelSpinner.setSelection(idx)
         b.modelSpinner.setOnItemSelectedListener(object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(p: android.widget.AdapterView<*>?, v: View?, pos: Int, id: Long) {
-                Prefs.setModel(requireContext(), preset[pos])
+                // 从当前 adapter 取模型名（refreshModels 会替换为真实模型+预设的更
+                // 长列表，若闭包捕获初始 preset 会在 pos 越界时崩溃 IndexOutOfBounds）
+                val adp = b.modelSpinner.adapter ?: return
+                if (pos < 0 || pos >= adp.count) return
+                val m = adp.getItem(pos) as? String ?: return
+                Prefs.setModel(requireContext(), m)
             }
 
             override fun onNothingSelected(p: android.widget.AdapterView<*>?) {}
