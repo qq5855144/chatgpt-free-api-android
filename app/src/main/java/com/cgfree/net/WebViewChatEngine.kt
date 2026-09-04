@@ -520,6 +520,41 @@ object WebViewChatEngine {
             }
             log('ui-start, msg-len=' + '__MSG__'.length);
             var pre = assistantText();
+            // ---------- 输入函数化（typeText 同步无 await，可在重试中复用） ----------
+            function typeText(inp) {
+              if (!inp) return false;
+              inp.focus();
+              var ce = (inp.isContentEditable === true) || (inp.tagName === 'DIV');
+              var ok = false;
+              if (ce) {
+                try {
+                  var sel = window.getSelection();
+                  sel.removeAllRanges();
+                  var range = document.createRange();
+                  range.selectNodeContents(inp);
+                  sel.addRange(range);
+                  ok = document.execCommand('insertText', false, '__MSG__');
+                  log('execCommand-insertText=' + ok);
+                } catch(e) { log('execCommand-ex=' + (e.message || e)); }
+                if (!ok) {
+                  inp.innerHTML = '';
+                  inp.innerText = '__MSG__';
+                  inp.dispatchEvent(new Event('input', { bubbles: true }));
+                  inp.dispatchEvent(new Event('change', { bubbles: true }));
+                  ok = true;
+                  log('fallback-innerText');
+                }
+              } else {
+                try {
+                  var proto = Object.getPrototypeOf(inp);
+                  var desc = Object.getOwnPropertyDescriptor(proto, 'value');
+                  if (desc && desc.set) desc.set.call(inp, '__MSG__');
+                  inp.dispatchEvent(new Event('input', { bubbles: true }));
+                } catch(e) { log('nativeValue-ex=' + (e.message || e)); inp.value = '__MSG__'; }
+                ok = true;
+              }
+              return ok;
+            }
             // 等待输入框出现（SPA 渲染延迟/页面重载场景），最多 20s
             var input = null;
             for (var wi2 = 0; wi2 < 40; wi2++) {
@@ -533,75 +568,35 @@ object WebViewChatEngine {
               return;
             }
             log('input-found: ' + input.tagName + '#' + (input.id || ''));
-            input.focus();
-            var isContentEditable = (input.isContentEditable === true) || (input.tagName === 'DIV');
-            var typedOk = false;
-            if (isContentEditable) {
-              try {
-                var sel = window.getSelection();
-                sel.removeAllRanges();
-                var range = document.createRange();
-                range.selectNodeContents(input);
-                sel.addRange(range);
-                typedOk = document.execCommand('insertText', false, '__MSG__');
-                log('execCommand-insertText=' + typedOk);
-              } catch(e) { log('execCommand-ex=' + (e.message || e)); }
-              if (!typedOk) {
-                input.innerHTML = '';
-                input.innerText = '__MSG__';
-                input.dispatchEvent(new Event('input', { bubbles: true }));
-                input.dispatchEvent(new Event('change', { bubbles: true }));
-                typedOk = true;
-                log('fallback-innerText');
-              }
-            } else {
-              setNativeValue(input, '__MSG__');
-              typedOk = true;
-            }
+            var typed = typeText(input);
+            log('typed=' + typed + ' ce=' + ((input.isContentEditable === true) || (input.tagName === 'DIV')));
             await new Promise(function(res){ setTimeout(res, 1200); });
-            var contentNow = isContentEditable ? (input.innerText || '') : (input.value || '');
-            log('content-len=' + contentNow.length + ' ce=' + isContentEditable);
-            // 若内容没进去，重试一次输入
-            if (typedOk && contentNow.length === 0) {
-              log('retry-input');
-              if (isContentEditable) {
-                try {
-                  var sel2 = window.getSelection();
-                  sel2.removeAllRanges();
-                  var range2 = document.createRange();
-                  range2.selectNodeContents(input);
-                  sel2.addRange(range2);
-                  typedOk = document.execCommand('insertText', false, '__MSG__');
-                  log('retry-execCommand=' + typedOk);
-                } catch(e2) { log('retry-ex=' + (e2.message || e2)); }
-                if (!typedOk) {
-                  input.innerText = '__MSG__';
-                  input.dispatchEvent(new Event('input', { bubbles: true }));
-                }
-              } else {
-                setNativeValue(input, '__MSG__');
-              }
+            var contentNow = ((input.isContentEditable === true) || (input.tagName === 'DIV')) ? (input.innerText || '') : (input.value || '');
+            log('content-len=' + contentNow.length);
+            if (typed && contentNow.length === 0) {
+              log('retry-type');
+              typeText(input);
               await new Promise(function(res){ setTimeout(res, 1000); });
-              contentNow = isContentEditable ? (input.innerText || '') : (input.value || '');
+              contentNow = ((input.isContentEditable === true) || (input.tagName === 'DIV')) ? (input.innerText || '') : (input.value || '');
               log('retry-content-len=' + contentNow.length);
             }
             // 等待发送按钮可用（React 异步更新），最多 5s
-            var btn = null;
-            for (var wi = 0; wi < 10; wi++) {
-              btn = findSendBtn();
-              if (btn && !btn.disabled) break;
+            var sendBtn = null;
+            for (var wi3 = 0; wi3 < 10; wi3++) {
+              sendBtn = findSendBtn();
+              if (sendBtn && !sendBtn.disabled) break;
               await new Promise(function(res){ setTimeout(res, 500); });
             }
-            btn = findSendBtn();
-            if (btn && !btn.disabled) {
-              btn.click();
+            sendBtn = findSendBtn();
+            if (sendBtn && !sendBtn.disabled) {
+              sendBtn.click();
               log('send-by-click');
             } else {
-              log('send-btn=' + (btn ? 'disabled' : 'missing') + ', fallback-enter');
+              log('send-btn=' + (sendBtn ? 'disabled' : 'missing') + ', fallback-enter');
               input.focus();
-              var ev = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true });
-              input.dispatchEvent(ev);
+              input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
               input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+              log('enter-sent');
             }
             var t0 = Date.now();
             var lastText = pre;
@@ -609,6 +604,8 @@ object WebViewChatEngine {
             var stableCnt = 0;
             var timeoutMs = 240000;
             var loopCnt = 0;
+            var lastSendAt = Date.now();
+            var sendRetries = 0;
             function finish(cur) {
               AndroidBridge.onEvent(cur);
               log('ui-done, len=' + cur.length + ', cost=' + ((Date.now() - t0) / 1000).toFixed(1) + 's');
@@ -620,7 +617,7 @@ object WebViewChatEngine {
               var cur = assistantText();
               if (loopCnt % 10 === 0) {
                 var dbgBtn = findSendBtn();
-                log('loop#' + loopCnt + ' textLen=' + cur.length + ' stop=' + (findStopBtn() ? 'Y' : 'N') + ' sendBtn=' + (dbgBtn ? (dbgBtn.disabled ? 'disabled' : 'ok') : 'missing') + ' stable=' + stableCnt);
+                log('loop#' + loopCnt + ' textLen=' + cur.length + ' stop=' + (findStopBtn() ? 'Y' : 'N') + ' sendBtn=' + (dbgBtn ? (dbgBtn.disabled ? 'disabled' : 'ok') : 'missing') + ' stable=' + stableCnt + ' retries=' + sendRetries);
               }
               if (cur !== lastText) {
                 lastText = cur;
@@ -630,12 +627,36 @@ object WebViewChatEngine {
               } else if (cur.length > pre.length) {
                 stableCnt++;
               }
-              var stop = findStopBtn();
-              var sendBtn = findSendBtn();
-              var textGrown = cur.length > pre.length;
-              // 完成判定双路径：1) sendBtn 可用（TEXTAREA 形态按钮常驻仅 disabled 切换） 2) 无 stop 且文本连续稳定 5 轮（约 3.5s，DIV 形态发送后按钮被移出 DOM 导致 sendBtn=missing）
-              if (!stop && textGrown && sendBtn && !sendBtn.disabled) { finish(cur); return; }
-              if (!stop && textGrown && stableCnt >= 5) { finish(cur); return; }
+              // 发送自愈：15s 无新回复且无生成中标记 → 重新输入+发送（最多 3 次）
+              var stopNow = findStopBtn();
+              var grown = cur.length > pre.length;
+              if (!grown && !stopNow && sendRetries < 3 && Date.now() - lastSendAt > 15000) {
+                sendRetries++;
+                log('resend #' + sendRetries + ' (textLen=' + cur.length + ')');
+                var inp2 = findInput();
+                if (inp2) {
+                  var c2 = ((inp2.isContentEditable === true) || (inp2.tagName === 'DIV')) ? (inp2.innerText || '') : (inp2.value || '');
+                  if (c2.length === 0) { typeText(inp2); await new Promise(function(res){ setTimeout(res, 1000); }); }
+                  var b2 = null;
+                  for (var wi4 = 0; wi4 < 10; wi4++) {
+                    b2 = findSendBtn();
+                    if (b2 && !b2.disabled) break;
+                    await new Promise(function(res){ setTimeout(res, 300); });
+                  }
+                  b2 = findSendBtn();
+                  if (b2 && !b2.disabled) { b2.click(); log('resend-click'); }
+                  else {
+                    inp2.focus();
+                    inp2.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+                    log('resend-enter');
+                  }
+                }
+                lastSendAt = Date.now();
+              }
+              var sendBtn2 = findSendBtn();
+              var done = !stopNow && grown && sendBtn2 && !sendBtn2.disabled;
+              if (done) { finish(cur); return; }
+              if (!stopNow && grown && stableCnt >= 5) { finish(cur); return; }
               if (Date.now() - t0 > timeoutMs) {
                 AndroidBridge.onError(0, 'UI 对话等待超时 240s（最后文本长度=' + cur.length + '，可能页面出现错误提示/验证）');
                 return;
