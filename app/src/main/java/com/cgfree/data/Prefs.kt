@@ -6,6 +6,9 @@ import android.content.Context
 object Prefs {
     private const val NAME = "cgfree_prefs"
 
+    /** 默认可复制的访问密钥：配合反代地址填入任意 OpenAI 兼容客户端（清空则不校验） */
+    const val DEFAULT_API_KEY = "sk-cgfree-local"
+
     private fun p(c: Context) = c.getSharedPreferences(NAME, Context.MODE_PRIVATE)
 
     fun port(c: Context): Int = p(c).getInt("port", 8787)
@@ -16,6 +19,9 @@ object Prefs {
 
     fun apiKey(c: Context): String? = p(c).getString("api_key", null)?.takeIf { it.isNotEmpty() }
     fun setApiKey(c: Context, v: String) = p(c).edit().putString("api_key", v.trim()).apply()
+
+    /** 当前生效密钥：已设置则用之，否则返回默认可复制密钥 */
+    fun apiKeyOrDefault(c: Context): String = apiKey(c) ?: DEFAULT_API_KEY
 
     fun model(c: Context): String = p(c).getString("model", ModelConst.DEFAULT) ?: ModelConst.DEFAULT
     fun setModel(c: Context, v: String) = p(c).edit().putString("model", v).apply()

@@ -19,7 +19,7 @@
 | 逆向调用网页私有接口 | 直连 `chatgpt.com/backend-api/conversation`（SSE 流式协议逆向） |
 | 网页免费额度 → API | 本地 NanoHTTPD 服务把网页会话翻译为 OpenAI 兼容接口 |
 | App 内直接聊天 | 内置聊天 Tab，流式输出，多轮对话 |
-| 免费用官方免费模型 | 默认 gpt-4o-mini / gpt-4o / gpt-4.1 系列 / o3-mini，可自动拉取账号真实可用模型列表 |
+| 免费用官方免费模型 | 默认 gpt-5 系列（gpt-5-6/gpt-5-5/mini 等），可自动拉取账号真实可用模型列表 |
 | 令牌过期自动续期 | 401/403 时用 Session Token 调 `/api/auth/session` 换取新 AccessToken |
 | 安装后实时自测 | 内置「调试」Tab：网络连通性 / 令牌校验 / 代理健康 / 模型列表 / 非流式 + 流式对话一键全链路自测 |
 | 构建架构 | 仅保留 arm64-v8a（`abiFilters`），安装包面向 64 位设备 |
@@ -68,6 +68,18 @@ git clone https://github.com/qq5855144/chatgpt-free-api-android.git
 
 > 架构：`app/build.gradle.kts` 中已通过 `ndk.abiFilters` 锁定 **arm64-v8a**（当前无原生 so 依赖，纯字节码 APK 实际仍兼容各架构；如需 32 位设备可移除该配置）。
 
+### 签名（debug 与 release 签名一致，可覆盖安装）
+
+- 仓库内置签名密钥：`keystore/cgfree-release.jks` + 根目录 `keystore.properties`（密码 `cgfree123`，alias `cgfree`）；
+- **debug 与 release 统一使用该密钥签名**——本机构建、GitHub Actions 构建、历次 CI 产物签名完全一致，后续版本可直接覆盖安装，不会再出现「签名不一致」；
+- 更换为自己的密钥（可选）：
+  ```bash
+  keytool -genkeypair -v -keystore my.keystore -alias cgfree -keyalg RSA -keysize 2048 -validity 36500 -storepass 你的密码 -keypass 你的密码 -dname "CN=ChatGPT Free API, OU=cgfree, O=cgfree, L=NA, ST=NA, C=CN"
+  # 然后修改 keystore.properties；如需 CI 用新密钥，把 keystore base64 配到 Actions Secrets 的 KEYSTORE_BASE64（优先级高于 keystore.properties）
+  base64 -w0 my.keystore   # Linux/macOS；Windows 用 certutil -encode
+  ```
+- ⚠️ 内置密钥公开于仓库，仅用于本项目自签 APK（学习自用）；介意者可自行更换（注意更换后旧包无法覆盖安装，需先卸载）。
+
 ## 使用步骤
 
 ### 1. 获取令牌（两种方式）
@@ -88,8 +100,8 @@ git clone https://github.com/qq5855144/chatgpt-free-api-android.git
 「API 服务」Tab：
 1. 打开「开启 API 反向代理服务」（前台服务保活）；
 2. 默认监听 `127.0.0.1:8787`（仅本机）；勾选「允许局域网访问」后同一 Wi-Fi 下的电脑/其他设备可访问；
-3. **开放局域网前务必设置访问密钥**（x-api-key），防止被滥用；
-4. 复制地址配置到任意 OpenAI 兼容客户端。
+3. **默认可复制访问密钥：`sk-cgfree-local`**（页面已预填，点「复制 Key」即可）——第三方客户端需携带 `x-api-key` 或 `Authorization: Bearer sk-cgfree-local`；清空密钥并重启服务则不校验（局域网建议保留密钥）；
+4. 复制地址配置到任意 OpenAI 兼容客户端：点「复制完整配置」一次复制 Base URL + API Key + Model，或点「复制 curl 示例」直接得到可执行命令。
 
 #### 接口
 ```http
@@ -97,13 +109,13 @@ GET  /v1/models
 POST /v1/chat/completions
 ```
 
-#### 请求示例（curl）
+#### 请求示例（curl，密钥默认可直接用）
 ```bash
 curl http://127.0.0.1:8787/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "x-api-key: 你的密钥" \
+  -H "Authorization: Bearer sk-cgfree-local" \
   -d '{
-    "model": "gpt-4o-mini",
+    "model": "gpt-5-5",
     "messages": [
       {"role": "system", "content": "你是一个助手"},
       {"role": "user", "content": "用一句话介绍 Android"}
@@ -116,7 +128,7 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 | 客户端 | Base URL 配置 |
 |--------|--------------|
 | NextChat / ChatBox / Cherry Studio / LobeChat | `http://<手机IP>:8787/v1` |
-| OpenAI SDK | `base_url = http://<手机IP>:8787/v1`，`api_key` 填任意值或设置的 x-api-key |
+| OpenAI SDK | `base_url = http://<手机IP>:8787/v1`，`api_key` 填 `sk-cgfree-local`（默认可复制密钥） |
 
 > 手机 IP 在「API 服务」页会自动显示。多轮对话请由客户端携带完整 messages 历史（服务端按全量历史转发）。
 

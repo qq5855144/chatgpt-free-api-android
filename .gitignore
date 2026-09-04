@@ -11,7 +11,10 @@ app/build
 *.apk
 *.aab
 
-# local release signing (never commit!)
+# local release signing (never commit your own!)
 keystore.properties
+!keystore.properties
 *.jks
 *.keystore
+!keystore/*.jks
+!keystore/*.keystore

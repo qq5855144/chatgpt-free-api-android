@@ -71,6 +71,12 @@ android {
     }
 
     buildTypes {
+        // debug 与 release 统一用仓库内置 keystore 签名（若存在 release 签名配置），
+        // 保证本机构建与 GitHub Actions 产物签名一致，可直接覆盖安装；
+        // 仓库未带 keystore（如 fork 后自行清理）时 debug 回退默认 debug key
+        debug {
+            signingConfigs.findByName("release")?.let { signingConfig = it }
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")

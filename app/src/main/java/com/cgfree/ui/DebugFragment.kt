@@ -96,6 +96,7 @@ class DebugFragment : Fragment() {
             append("accessToken：").append(mask(acc)).append('\n')
             append("sessionToken：").append(mask(sess)).append('\n')
             append("代理服务：").append(if (running) "运行中 (127.0.0.1:$port)" else "未运行").append('\n')
+            append("API Key：").append(Prefs.apiKeyOrDefault(ctx)).append('\n')
             append("模型：").append(Prefs.model(ctx))
         }
         b.btnProxyToggle.text = if (running) "停止代理" else "启动代理"
@@ -243,7 +244,12 @@ class DebugFragment : Fragment() {
     }
 
     private fun getJson(url: String): String {
-        val req = Request.Builder().url(url).get().build()
+        val key = Prefs.apiKeyOrDefault(requireContext())
+        val req = Request.Builder()
+            .url(url)
+            .header("Authorization", "Bearer $key")
+            .get()
+            .build()
         http.newCall(req).execute().use { resp ->
             val body = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}: ${body.take(200)}")
@@ -292,8 +298,10 @@ class DebugFragment : Fragment() {
             JSONObject().put("role", "user").put("content", "这是一条连通性自测消息，请只回复：PONG")
         ))
         val body = RequestBody.create("application/json; charset=utf-8".toMediaType(), payload.toString())
+        val key = Prefs.apiKeyOrDefault(requireContext())
         val req = Request.Builder()
             .url("$base/v1/chat/completions")
+            .header("Authorization", "Bearer $key")
             .post(body)
             .build()
 

@@ -42,7 +42,8 @@ class ServerFragment : Fragment() {
         // 载入配置
         b.portInput.setText(Prefs.port(requireContext()).toString())
         b.lanSwitch.isChecked = Prefs.lanEnabled(requireContext())
-        b.apiKeyInput.setText(Prefs.apiKey(requireContext()) ?: "")
+        // 默认预填可复制 API Key（未设置过则显示默认值，方便第三方客户端直接复制使用）
+        b.apiKeyInput.setText(Prefs.apiKeyOrDefault(requireContext()))
         refreshUrls()
 
         attachSwitchListener()
@@ -51,11 +52,45 @@ class ServerFragment : Fragment() {
 
         b.copyLoopBtn.setOnClickListener { copy(b.loopUrl.text.toString()) }
         b.copyLanBtn.setOnClickListener { copy(b.lanUrl.text.toString()) }
+        b.copyKeyBtn.setOnClickListener {
+            copy(b.apiKeyInput.text.toString().trim().ifEmpty { Prefs.DEFAULT_API_KEY })
+        }
+        b.copyFullBtn.setOnClickListener { copyFullConfig() }
+        b.copyCurlBtn.setOnClickListener { copyCurlExample() }
         b.logView.setOnLongClickListener {
             LogBuffer.clear()
             refreshLogView()
             true
         }
+    }
+
+    /** 复制第三方客户端完整配置：BaseURL（本机/局域网）+ API Key */
+    private fun copyFullConfig() {
+        val ctx = requireContext()
+        val key = b.apiKeyInput.text.toString().trim().ifEmpty { Prefs.DEFAULT_API_KEY }
+        val port = (b.portInput.text.toString().toIntOrNull() ?: Prefs.port(ctx)).toString()
+        val sb = StringBuilder()
+        sb.append("Base URL(本机): http://127.0.0.1:$port/v1").append('\n')
+        val ips = lanIps()
+        if (ips.isNotEmpty()) {
+            sb.append("Base URL(局域网): ").append(ips.joinToString(" / ") { "http://$it:$port/v1" }).append('\n')
+        }
+        sb.append("API Key: $key").append('\n')
+        sb.append("Model: ").append(Prefs.model(ctx))
+        copy(sb.toString())
+    }
+
+    /** 复制 curl 直连示例 */
+    private fun copyCurlExample() {
+        val ctx = requireContext()
+        val key = b.apiKeyInput.text.toString().trim().ifEmpty { Prefs.DEFAULT_API_KEY }
+        val port = (b.portInput.text.toString().toIntOrNull() ?: Prefs.port(ctx)).toString()
+        val model = Prefs.model(ctx)
+        val cmd = "curl http://127.0.0.1:$port/v1/chat/completions \\\n" +
+            "  -H \"Content-Type: application/json\" \\\n" +
+            "  -H \"Authorization: Bearer $key\" \\\n" +
+            "  -d '{\"model\": \"$model\", \"stream\": true, \"messages\": [{\"role\": \"user\", \"content\": \"你好\"}]}'"
+        copy(cmd)
     }
 
     private fun attachSwitchListener() {
