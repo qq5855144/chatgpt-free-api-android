@@ -95,7 +95,9 @@ object WebViewChatEngine {
         fun push(snapshot: String) {
             if (finished || snapshot.isEmpty()) return
             touch()
-            onEvent(ChatGPTClient.Event.Delta(snapshot))
+            // 回调异常必须隔离：会经 JS bridge 以 "Java exception" 抛回页面 JS 破坏流程
+            runCatching { onEvent(ChatGPTClient.Event.Delta(snapshot)) }
+                .onFailure { LogBuffer.log("[Session] push onEvent: ${it.message}") }
         }
 
         /** JS 回调：事件流结束 */
@@ -106,9 +108,14 @@ object WebViewChatEngine {
             touch()
             // 关键：清空 running，否则后续会话入队后 pump 因 running!=null 永不执行（首次成功后全卡死）
             if (running === this) running = null
-            onEvent(ChatGPTClient.Event.Done)
-            done.countDown()
-            scheduleNext()
+            try {
+                onEvent(ChatGPTClient.Event.Done)
+            } catch (e: Throwable) {
+                LogBuffer.log("[Session] finish onEvent: ${e.message}")
+            } finally {
+                done.countDown()
+                scheduleNext()
+            }
         }
         /** JS 回调：错误 */
         @Synchronized
@@ -118,9 +125,14 @@ object WebViewChatEngine {
             touch()
             // 同上：清理 running 以放行后续会话
             if (running === this) running = null
-            onEvent(ChatGPTClient.Event.Error(WebViewChatEngine.friendlyError(status, message), status))
-            done.countDown()
-            scheduleNext()
+            try {
+                onEvent(ChatGPTClient.Event.Error(WebViewChatEngine.friendlyError(status, message), status))
+            } catch (e: Throwable) {
+                LogBuffer.log("[Session] fail onEvent: ${e.message}")
+            } finally {
+                done.countDown()
+                scheduleNext()
+            }
         }
 
         private fun scheduleNext() {
@@ -162,31 +174,40 @@ object WebViewChatEngine {
                 // 去掉 "; wv" 标识，使 UA 与普通 Chrome 完全一致（登录 WebView 同款处理）
                 w.settings.userAgentString = w.settings.userAgentString.replace("; wv", "")
                 w.addJavascriptInterface(object {
+                    // 所有桥方法必须异常隔离：任何 Java 异常都会以 "Java exception was raised
+                    // during method invocation" 抛回页面 JS，破坏对话流程（⑥流式曾因此中断）。
+                    private fun safe(tag: String, block: () -> Unit) {
+                        try {
+                            block()
+                        } catch (e: Throwable) {
+                            LogBuffer.log("[Bridge:$tag] ${e.message}")
+                        }
+                    }
                     @JavascriptInterface
-                    fun onToken(token: String) {
-                        val s = running ?: return
+                    fun onToken(token: String) = safe("onToken") {
+                        val s = running ?: return@safe
                         if (token.isNotBlank()) s.onToken(token)
                     }
                     @JavascriptInterface
-                    fun onEvent(snapshot: String) {
+                    fun onEvent(snapshot: String) = safe("onEvent") {
                         running?.push(snapshot)
                     }
                     @JavascriptInterface
-                    fun onDone() {
+                    fun onDone() = safe("onDone") {
                         running?.finish()
                     }
                     @JavascriptInterface
-                    fun onError(status: Int, message: String) {
+                    fun onError(status: Int, message: String) = safe("onError") {
                         running?.fail(if (status == 0) null else status, message)
                     }
                     @JavascriptInterface
-                    fun onLog(msg: String) {
+                    fun onLog(msg: String) = safe("onLog") {
                         running?.touch()
                         LogBuffer.log("[WV-UI] $msg")
                         Log.i("CGFREE_JS", msg)
                     }
                     @JavascriptInterface
-                    fun onDiag(json: String) {
+                    fun onDiag(json: String) = safe("onDiag") {
                         diagResult = json
                         diagLatch?.countDown()
                     }

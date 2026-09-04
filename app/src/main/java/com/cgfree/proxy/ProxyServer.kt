@@ -144,7 +144,7 @@ class ProxyServer(
             return jsonError(401, "账号未登录：请先在 App「账号」页登录 ChatGPT 或粘贴令牌")
         }
 
-        val raw = session.inputStream.readBytes().toString(Charsets.UTF_8)
+        val raw = readBody(session)
         val body = if (raw.isBlank()) JSONObject() else runCatching { JSONObject(raw) }.getOrElse {
             return jsonError(400, "请求体不是合法 JSON")
         }
@@ -183,6 +183,22 @@ class ProxyServer(
         return if (stream) streamResponse(token, request) else syncResponse(token, request)
     }
 
+    /**
+     * 读取请求体：走 NanoHTTPD 官方 parseBody（非表单 content-type 的 body 存入 files["postData"]）。
+     * 不能直接 session.inputStream.readBytes()：NanoHTTPD 不会按 Content-Length 截断输入流，
+     * 对 keep-alive 连接 readBytes() 会一直阻塞到客户端断开——表现为请求 60~120s 后才开始执行
+     * （实为客户端读超时断开连接的时刻），客户端早已超时，表现为“⑤ 跑不通”。
+     */
+    private fun readBody(session: IHTTPSession): String {
+        val files = java.util.HashMap<String, String>()
+        try {
+            session.parseBody(files)
+        } catch (e: Exception) {
+            LogBuffer.log("请求体解析失败: ${e.message}")
+            return ""
+        }
+        return files["postData"] ?: ""
+    }
     /** OpenAI content 可能是字符串或分段数组（忽略图片等多模态内容） */
     private fun extractText(content: Any?): String? = when (content) {
         is String -> if (content.isBlank()) null else content
