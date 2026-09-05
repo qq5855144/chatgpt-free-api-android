@@ -16,6 +16,10 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
+import java.nio.ByteBuffer
+import java.nio.charset.CharacterCodingException
+import java.nio.charset.Charset
+import java.nio.charset.CodingErrorAction
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -190,11 +194,12 @@ class ProxyServer(
     }
 
     /**
-     * 严格按 HTTP 字节读取 JSON 并统一以 UTF-8 解码。
+     * 严格按 HTTP 字节读取 JSON，再按声明/BOM/内容自动识别字符集。
      *
      * NanoHTTPD parseBody() 会依据 Content-Type 中声明的 charset 转成 String；部分 OpenAI
      * 客户端只发送 application/json 而不附 charset，中文可能先被错误解码成 �。这里按
-     * Content-Length 精确读取（不会等待 keep-alive 连接 EOF），从源头保留中文与 emoji。
+     * Content-Length 精确读取（不会等待 keep-alive 连接 EOF），再兼容 UTF-8、UTF-16
+     * 与 GB18030，从源头保留中文与 emoji。
      */
     private fun readBody(session: IHTTPSession): String {
         val length = session.headers["content-length"]?.toLongOrNull()
@@ -214,7 +219,7 @@ class ProxyServer(
             if (offset != bytes.size) {
                 LogBuffer.log("请求体不完整：Content-Length=${bytes.size}，实际读取=$offset")
             }
-            return String(bytes, 0, offset, Charsets.UTF_8)
+            return decodeJsonBody(bytes.copyOf(offset), session.headers["content-type"])
         }
 
         // HTTP/1.1 chunked 请求没有 Content-Length；NanoHTTPD 已负责解除分块，按 EOF
@@ -231,7 +236,7 @@ class ProxyServer(
                 }
                 out.write(buffer, 0, count)
             }
-            return out.toString(Charsets.UTF_8.name())
+            return decodeJsonBody(out.toByteArray(), session.headers["content-type"])
         }
 
         // 极少数非标准客户端既不发 Content-Length 也不使用 chunked，保留兼容回退。
@@ -244,6 +249,59 @@ class ProxyServer(
         }
         return files["postData"] ?: ""
     }
+
+    /**
+     * 按 JSON 有效性自动识别请求字符集。标准客户端会命中 UTF-8；部分 Android/本地
+     * 客户端错误地用 GBK/GB18030 或 UTF-16 编码且没有声明 charset，也能在这里恢复。
+     */
+    private fun decodeJsonBody(bytes: ByteArray, contentType: String?): String {
+        if (bytes.isEmpty()) return ""
+
+        val declared = Regex("charset\\s*=\\s*[\\\"']?([^;\\\"'\\s]+)", RegexOption.IGNORE_CASE)
+            .find(contentType.orEmpty())
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.let { runCatching { Charset.forName(it) }.getOrNull() }
+
+        val bomCharset = when {
+            bytes.size >= 3 && bytes[0] == 0xEF.toByte() && bytes[1] == 0xBB.toByte() && bytes[2] == 0xBF.toByte() -> Charsets.UTF_8
+            bytes.size >= 2 && bytes[0] == 0xFF.toByte() && bytes[1] == 0xFE.toByte() -> Charsets.UTF_16LE
+            bytes.size >= 2 && bytes[0] == 0xFE.toByte() && bytes[1] == 0xFF.toByte() -> Charsets.UTF_16BE
+            else -> null
+        }
+
+        val candidates = linkedSetOf<Charset>()
+        declared?.let { candidates.add(it) }
+        bomCharset?.let { candidates.add(it) }
+        candidates.add(Charsets.UTF_8)
+        candidates.add(Charsets.UTF_16LE)
+        candidates.add(Charsets.UTF_16BE)
+        runCatching { Charset.forName("GB18030") }.getOrNull()?.let { candidates.add(it) }
+
+        for (charset in candidates) {
+            val decoded = decodeStrict(bytes, charset) ?: continue
+            val normalized = decoded.removePrefix("\uFEFF").trim()
+            if (runCatching { JSONObject(normalized) }.isSuccess) {
+                LogBuffer.log("请求体字符集: ${charset.name()}${if (declared != null) "（声明 ${declared.name()}）" else "（自动识别）"}")
+                return normalized
+            }
+        }
+
+        // 保留可诊断结果：调用方会检测 U+FFFD 并返回明确的 400，而不是传给 AI。
+        LogBuffer.log("请求体字符集识别失败 contentType=${contentType.orEmpty().take(80)} bytes=${bytes.size}")
+        return String(bytes, Charsets.UTF_8).removePrefix("\uFEFF")
+    }
+
+    private fun decodeStrict(bytes: ByteArray, charset: Charset): String? = try {
+        charset.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(ByteBuffer.wrap(bytes))
+            .toString()
+    } catch (ignored: CharacterCodingException) {
+        null
+    }
+
     /** OpenAI content 可能是字符串或分段数组（忽略图片等多模态内容） */
     private fun extractText(content: Any?): String? = when (content) {
         is String -> if (content.isBlank()) null else content
