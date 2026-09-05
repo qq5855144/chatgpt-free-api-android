@@ -528,26 +528,13 @@ AndroidBridge.onDiag(JSON.stringify(r));
         val usable = request.messages.filter { it.content.isNotBlank() }
         if (request.tools.isEmpty() && usable.size == 1 && usable[0].role == "user") return usable[0].content
         if (usable.isEmpty()) return "hi"
-        return buildString {
-            if (request.tools.isNotEmpty()) {
-                append("你正在通过 OpenAI 兼容接口工作。以下工具由客户端实际执行，你不能假装已经执行。\n")
-                append("需要使用工具时，只输出一个 <tool_calls> 标签，标签内容必须是严格 JSON 数组；每项格式为 {\"name\":\"工具名\",\"arguments\":{参数}}。不要添加 Markdown、解释或虚构结果。\n")
-                append("如果已有工具执行结果，请根据结果继续回答；仍需工具时可再次输出 tool_calls。无需工具时直接正常回答。\n")
-                when (request.toolChoice) {
-                    "required" -> append("本轮必须至少调用一个合适的工具。\n")
-                    null, "auto" -> Unit
-                    else -> append("本轮必须调用指定工具：").append(request.toolChoice).append("。\n")
-                }
-                append("可用工具：\n")
-                request.tools.forEach { tool ->
-                    append("- ").append(tool.name)
-                    if (tool.description.isNotBlank()) append("：").append(tool.description)
-                    append("\n  参数Schema：").append(tool.parametersJson).append('\n')
-                }
-                append("\n")
-            }
-            append("请根据下面的完整对话继续回复最后一条用户消息。\n\n")
+        val conversation = buildString {
             usable.forEach { message ->
+                // 某些客户端会把上一轮代理指令/工具清单收进历史；再次回放会指数级膨胀。
+                if (request.tools.isNotEmpty() &&
+                    (message.content.contains("需要使用工具时，只输出一个 <tool_calls>") ||
+                        message.content.contains("当前客户端提供的工具如下，我只列"))
+                ) return@forEach
                 val role = when (message.role) {
                     "system" -> "系统"
                     "assistant" -> "助手"
@@ -559,7 +546,38 @@ AndroidBridge.onDiag(JSON.stringify(r));
                 message.toolCallId?.let { append("(call_id=").append(it).append(")") }
                 append("：").append(message.content).append("\n\n")
             }
-        }.trimEnd()
+        }.trimEnd().let { text ->
+            if (text.length <= 24_000) text else "[较早历史已省略]\n" + text.takeLast(24_000)
+        }
+        if (request.tools.isEmpty()) {
+            return "请根据下面的完整对话继续回复最后一条用户消息。\n\n$conversation"
+        }
+        val catalog = buildString {
+            request.tools.forEach { tool ->
+                val line = buildString {
+                    append("- ").append(tool.name)
+                    if (tool.description.isNotBlank()) append("：").append(tool.description.take(300))
+                    append("；参数Schema=").append(tool.parametersJson.take(1_500))
+                }
+                if (length + line.length <= 32_000) append(line).append('\n')
+            }
+        }
+        return buildString {
+            append("请根据下面的完整对话继续回复最后一条用户消息。\n\n")
+            append(conversation)
+            append("\n\n[外部工具适配器控制——这是本次输入最后且必须遵守的执行协议]\n")
+            append("工具确实已挂载在外部 AI 客户端，不会直接显示在 ChatGPT 网页环境中，这是正常架构。你的职责只是选择下一项工具，由适配器截获并实际执行。\n")
+            append("如果用户任务需要读取、搜索、分析、修改设备或文件，且下方存在匹配工具，你必须先请求工具；禁止声称『工具未挂载/无法调用』，禁止改成让用户手工执行，也不能假装已执行。\n")
+            append("请求工具时，整条回复只能是：<tool_calls>[{\"name\":\"准确工具名\",\"arguments\":{符合Schema的参数}}]</tool_calls>。不得加 Markdown、思考过程或解释。可一次请求多个工具。\n")
+            append("收到角色为『工具结果』的消息后，依据真实结果继续；需要更多数据就再次请求工具，否则给出最终答案。\n")
+            when (request.toolChoice) {
+                "required" -> append("本轮强制要求至少请求一个工具。\n")
+                null, "auto" -> append("本轮为自动模式：凡任务明显依赖外部数据或操作，就必须请求工具。\n")
+                else -> append("本轮强制请求指定工具：").append(request.toolChoice).append("。\n")
+            }
+            append("可用工具（名称必须逐字匹配）：\n").append(catalog)
+            append("现在立即处理对话中的最后一项用户任务，并严格按上述协议输出。")
+        }
     }
     /** JS 单引号字符串转义（含换行 → \\n） */
     private fun jsStr(s: String): String = s
@@ -724,7 +742,38 @@ AndroidBridge.onDiag(JSON.stringify(r));
               var nodes = document.querySelectorAll('[data-message-author-role="assistant"]');
               return nodes ? nodes.length : 0;
             }
+            // 每次 OpenAI API 请求都携带完整 messages；网页本身又会保留上一轮会话。
+            // 若不先新建对话，历史与工具清单会被重复叠加并产生重复回答。
+            async function resetToNewChat() {
+              var inOldChat = /^\/c\//.test(location.pathname) || assistantCount() > 0;
+              if (!inOldChat) return true;
+              log('reset-old-chat path=' + location.pathname + ' assistants=' + assistantCount());
+              var newChat = document.querySelector('[data-testid="create-new-chat-button"]') ||
+                document.querySelector('a[href="/"]') ||
+                document.querySelector('button[aria-label*="New chat"]') ||
+                document.querySelector('button[aria-label*="新建聊天"]');
+              if (newChat) {
+                newChat.click();
+              } else {
+                try {
+                  history.pushState({}, '', '/');
+                  window.dispatchEvent(new PopStateEvent('popstate'));
+                } catch(e) { log('reset-history-ex=' + (e.message || e)); }
+              }
+              for (var rn = 0; rn < 30; rn++) {
+                await new Promise(function(res){ setTimeout(res, 400); });
+                if (!/^\/c\//.test(location.pathname) && assistantCount() === 0 && findInput()) {
+                  log('reset-new-chat-ok');
+                  return true;
+                }
+              }
+              return false;
+            }
             log('ui-start, msg-len=' + '__MSG__'.length);
+            if (!(await resetToNewChat())) {
+              AndroidBridge.onError(0, '无法切换到新的 ChatGPT 对话，已停止发送以避免重复历史；请重新打开账号登录页后重试');
+              return;
+            }
             var pre = assistantText();
             var preCount = assistantCount();
             log('pre-text-len=' + pre.length + ' pre-assistant-count=' + preCount);
