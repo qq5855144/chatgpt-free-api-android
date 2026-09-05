@@ -16,6 +16,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.cgfree.BuildConfig
 import com.cgfree.data.ConversationRequest
+import com.cgfree.data.TokenStore
 import com.cgfree.util.LogBuffer
 import org.json.JSONObject
 import java.util.UUID
@@ -152,6 +153,9 @@ object WebViewChatEngine {
         }
         main.post {
             try {
+                // 进程被系统回收后 CookieManager 可能为空；手动粘贴 Cookie 也只存在加密存储中。
+                // 在加载 ChatGPT 前恢复会话，保证 /api/auth/session 能读到登录 Cookie。
+                TokenStore.restoreCookieToWebView(context.applicationContext)
                 val w = WebView(context.applicationContext)
                 w.settings.javaScriptEnabled = true
                 w.settings.domStorageEnabled = true
@@ -186,7 +190,10 @@ object WebViewChatEngine {
                     @JavascriptInterface
                     fun onToken(token: String) = safe("onToken") {
                         val s = running ?: return@safe
-                        if (token.isNotBlank()) s.onToken(token)
+                        if (token.isNotBlank()) {
+                            TokenStore.captureCookieFromWebView(context.applicationContext)
+                            s.onToken(token)
+                        }
                     }
                     @JavascriptInterface
                     fun onEvent(snapshot: String) = safe("onEvent") {
@@ -214,6 +221,7 @@ object WebViewChatEngine {
                 }, "AndroidBridge")
                 w.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView?, url: String?) {
+                        TokenStore.captureCookieFromWebView(context.applicationContext)
                         synchronized(lock) {
                             pageReady = true
                             lock.notifyAll()
@@ -395,6 +403,12 @@ AndroidBridge.onDiag(JSON.stringify(r));
                 }
             }
         }
+    }
+
+    /** 凭证保存、重新登录或退出后重建隐藏 WebView，使新 Cookie 立即生效。 */
+    fun reloadSession(context: Context) {
+        destroyEngine()
+        main.post { ensure(context.applicationContext) }
     }
 
     /**
