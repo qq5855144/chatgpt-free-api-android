@@ -46,7 +46,7 @@
                     android:layout_weight="1"
                     android:layout_marginStart="8dp"
                     android:inputType="number"
-                    android:text="8787" />
+                    android:text="5656" />
             </LinearLayout>
 
             <com.google.android.material.switchmaterial.SwitchMaterial
