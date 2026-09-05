@@ -42,7 +42,7 @@
                                     │  GET /v1/models          │
                                     │  POST /v1/chat/completions│
                                     └─────┬─────────────────────┘
-                                          │ http://127.0.0.1:8787/v1
+                                          │ http://127.0.0.1:5656/v1
                               ┌───────────┴────────────┐
                               │ 本机 App 内置聊天        │
                               │ 电脑/其他客户端(局域网)   │
@@ -102,7 +102,7 @@ git clone https://github.com/qq5855144/chatgpt-free-api-android.git
 ### 3. 开放 OpenAI 兼容 API（核心功能）
 「API 服务」Tab：
 1. 打开「开启 API 反向代理服务」（前台服务保活）；
-2. 默认监听 `127.0.0.1:8787`（仅本机）；勾选「允许局域网访问」后同一 Wi-Fi 下的电脑/其他设备可访问；
+2. 默认监听 `127.0.0.1:5656`（仅本机）；从旧版本升级时，原默认端口 `8787` 会自动迁移为 `5656`；勾选「允许局域网访问」后同一 Wi-Fi 下的电脑/其他设备可访问；
 3. **默认可复制访问密钥：`sk-cgfree-local`**（页面已预填，点「复制 Key」即可）——第三方客户端需携带 `x-api-key` 或 `Authorization: Bearer sk-cgfree-local`；清空密钥并重启服务则不校验（局域网建议保留密钥）；
 4. 复制地址配置到任意 OpenAI 兼容客户端：点「复制完整配置」一次复制 Base URL + API Key + Model，或点「复制 curl 示例」直接得到可执行命令。
 
@@ -114,7 +114,7 @@ POST /v1/chat/completions
 
 #### 请求示例（curl，密钥默认可直接用）
 ```bash
-curl http://127.0.0.1:8787/v1/chat/completions \
+curl http://127.0.0.1:5656/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer sk-cgfree-local" \
   -d '{
@@ -130,8 +130,8 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 #### 在第三方客户端中使用（手机同一 Wi-Fi 的电脑）
 | 客户端 | Base URL 配置 |
 |--------|--------------|
-| NextChat / ChatBox / Cherry Studio / LobeChat | `http://<手机IP>:8787/v1` |
-| OpenAI SDK | `base_url = http://<手机IP>:8787/v1`，`api_key` 填 `sk-cgfree-local`（默认可复制密钥） |
+| NextChat / ChatBox / Cherry Studio / LobeChat | `http://<手机IP>:5656/v1` |
+| OpenAI SDK | `base_url = http://<手机IP>:5656/v1`，`api_key` 填 `sk-cgfree-local`（默认可复制密钥） |
 
 > 手机 IP 在「API 服务」页会自动显示。多轮对话请由客户端携带完整 messages 历史（服务端按全量历史转发）。
 

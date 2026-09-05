@@ -23,7 +23,7 @@ class ProxyService : Service() {
 
     companion object {
         private const val CHANNEL_ID = "cgfree_proxy"
-        private const val NOTIFY_ID = 8787
+        private const val NOTIFY_ID = 1001
 
         @Volatile
         var instance: ProxyServer? = null
