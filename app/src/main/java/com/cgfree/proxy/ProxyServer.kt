@@ -169,13 +169,26 @@ class ProxyServer(
             ?: return jsonError(400, "缺少 messages 字段")
         if (msgsArr.length() == 0) return jsonError(400, "messages 不能为空")
 
+        // OpenAI 客户端通常会在每次请求中重发完整会话历史。旧版本已经产生的乱码
+        // 也会随历史一起回来；只要当前最后一条 user 消息正常，就跳过损坏的旧消息。
+        var lastUserIndex = -1
+        for (i in 0 until msgsArr.length()) {
+            if (msgsArr.optJSONObject(i)?.optString("role", "")?.equals("user", ignoreCase = true) == true) {
+                lastUserIndex = i
+            }
+        }
+
         val chatMsgs = ArrayList<ChatMsg>()
         for (i in 0 until msgsArr.length()) {
             val m = msgsArr.optJSONObject(i) ?: continue
-            val role = m.optString("role", "user")
+            val role = m.optString("role", "user").lowercase()
             val content = extractText(m.opt("content")) ?: continue
             if ('\uFFFD' in content) {
-                return jsonError(400, "请求消息包含乱码替换字符（�）：请确认聊天客户端以 UTF-8 发送 JSON")
+                if (i == lastUserIndex) {
+                    return jsonError(400, "当前用户消息已在聊天客户端内损坏（包含 �），请新建会话后重新输入")
+                }
+                LogBuffer.log("已跳过含乱码的历史消息 index=$i role=$role chars=${content.length}")
+                continue
             }
             chatMsgs.add(ChatMsg(role, content))
         }
