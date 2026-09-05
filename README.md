@@ -180,7 +180,7 @@ app/src/main/java/com/cgfree/
 
 ## 常见问题
 
-- **401/403 登录失效**：AccessToken 过期。保存了 SessionToken 会自动刷新；否则重新粘贴令牌。
+- **401/403 登录失效**：AccessToken 过期。v1.0.15 起会在进程重启后自动把加密保存的 Cookie 恢复到 WebView；保存了 SessionToken 时也会自动刷新 AccessToken。若仍失败，请重新登录以更新 Cookie。
 - **429 请求频繁**：官方限流，等待片刻再试（免费模型限制请以官方为准）。
 - **Cloudflare 验证**：WebView 登录可能被拦，改用电脑浏览器手动复制令牌（方式 B）。
 - **代理启动失败**：端口被占用，换一个端口；检查日志（长按日志可清空）。

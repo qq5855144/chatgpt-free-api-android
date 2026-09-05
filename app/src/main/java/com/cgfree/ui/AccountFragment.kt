@@ -12,6 +12,7 @@ import android.widget.Toast
 import androidx.fragment.app.Fragment
 import com.cgfree.data.TokenStore
 import com.cgfree.databinding.FragmentAccountBinding
+import com.cgfree.net.WebViewChatEngine
 
 class AccountFragment : Fragment() {
     private var _b: FragmentAccountBinding? = null
@@ -38,12 +39,18 @@ class AccountFragment : Fragment() {
             }
             if (at.isNotEmpty()) TokenStore.saveAccessToken(requireContext(), at)
             if (st.isNotEmpty()) TokenStore.saveSessionToken(requireContext(), st)
-            if (ck.isNotEmpty()) TokenStore.saveCookie(requireContext(), ck)
+            if (ck.isNotEmpty()) {
+                TokenStore.saveCookie(requireContext(), ck)
+                TokenStore.restoreCookieToWebView(requireContext(), force = true)
+            }
+            WebViewChatEngine.reloadSession(requireContext())
             refreshStatus()
             Toast.makeText(requireContext(), "令牌已加密保存", Toast.LENGTH_SHORT).show()
         }
         b.clearBtn.setOnClickListener {
-            TokenStore.clear(requireContext())
+            val ctx = requireContext().applicationContext
+            TokenStore.clear(ctx)
+            TokenStore.clearWebViewCookie { WebViewChatEngine.reloadSession(ctx) }
             b.accessTokenInput.setText("")
             b.sessionInput.setText("")
             b.cookieInput.setText("")

@@ -10,6 +10,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.cgfree.data.TokenStore
 import com.cgfree.databinding.ActivityLoginBinding
+import com.cgfree.net.WebViewChatEngine
 
 /**
  * WebView 登录页：用户手动登录 chatgpt.com，
@@ -67,13 +68,13 @@ class LoginActivity : AppCompatActivity() {
             @android.webkit.JavascriptInterface
             fun onTokens(accessToken: String, email: String) {
                 runOnUiThread {
-                    val cookie = CookieManager.getInstance().getCookie("https://chatgpt.com") ?: ""
+                    val cookie = TokenStore.captureCookieFromWebView(this@LoginActivity) ?: ""
                     val session = extractSessionToken(cookie)
                     if (accessToken.isNotBlank()) {
                         TokenStore.saveAccessToken(this@LoginActivity, accessToken)
                         if (session != null) TokenStore.saveSessionToken(this@LoginActivity, session)
-                        if (cookie.isNotBlank()) TokenStore.saveCookie(this@LoginActivity, cookie)
                         if (email.isNotBlank()) TokenStore.saveEmail(this@LoginActivity, email)
+                        WebViewChatEngine.reloadSession(this@LoginActivity)
                         Toast.makeText(this@LoginActivity, "令牌提取成功：accessToken ${if (accessToken.isNotBlank()) "✓" else "✗"}，sessionToken ${if (session != null) "✓" else "✗"}", Toast.LENGTH_LONG).show()
                         finish()
                     } else {
@@ -91,12 +92,23 @@ class LoginActivity : AppCompatActivity() {
     }
 
     private fun extractSessionToken(cookie: String): String? {
-        val key = "__Secure-next-auth.session-token="
-        val i = cookie.indexOf(key)
-        if (i < 0) return null
-        val v = cookie.substring(i + key.length)
-        val end = v.indexOf(';')
-        return (if (end < 0) v else v.substring(0, end)).trim().takeIf { it.isNotEmpty() }
+        val values = cookie.split(';').mapNotNull { part ->
+            val p = part.trim()
+            val i = p.indexOf('=')
+            if (i <= 0) null else p.substring(0, i) to p.substring(i + 1)
+        }.toMap()
+        val names = listOf("__Secure-next-auth.session-token", "__Secure-authjs.session-token")
+        for (name in names) {
+            values[name]?.takeIf { it.isNotBlank() }?.let { return it }
+            val chunks = values.entries
+                .mapNotNull { (key, value) ->
+                    val index = key.removePrefix("$name.").toIntOrNull()
+                    if (key.startsWith("$name.") && index != null) index to value else null
+                }
+                .sortedBy { it.first }
+            if (chunks.isNotEmpty()) return chunks.joinToString("") { it.second }
+        }
+        return null
     }
 
     @Deprecated("Deprecated in Java")
