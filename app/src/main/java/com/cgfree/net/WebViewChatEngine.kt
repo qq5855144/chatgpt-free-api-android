@@ -526,17 +526,38 @@ AndroidBridge.onDiag(JSON.stringify(r));
      */
     private fun promptText(request: ConversationRequest): String {
         val usable = request.messages.filter { it.content.isNotBlank() }
-        if (usable.size == 1 && usable[0].role == "user") return usable[0].content
+        if (request.tools.isEmpty() && usable.size == 1 && usable[0].role == "user") return usable[0].content
         if (usable.isEmpty()) return "hi"
         return buildString {
+            if (request.tools.isNotEmpty()) {
+                append("你正在通过 OpenAI 兼容接口工作。以下工具由客户端实际执行，你不能假装已经执行。\n")
+                append("需要使用工具时，只输出一个 <tool_calls> 标签，标签内容必须是严格 JSON 数组；每项格式为 {\"name\":\"工具名\",\"arguments\":{参数}}。不要添加 Markdown、解释或虚构结果。\n")
+                append("如果已有工具执行结果，请根据结果继续回答；仍需工具时可再次输出 tool_calls。无需工具时直接正常回答。\n")
+                when (request.toolChoice) {
+                    "required" -> append("本轮必须至少调用一个合适的工具。\n")
+                    null, "auto" -> Unit
+                    else -> append("本轮必须调用指定工具：").append(request.toolChoice).append("。\n")
+                }
+                append("可用工具：\n")
+                request.tools.forEach { tool ->
+                    append("- ").append(tool.name)
+                    if (tool.description.isNotBlank()) append("：").append(tool.description)
+                    append("\n  参数Schema：").append(tool.parametersJson).append('\n')
+                }
+                append("\n")
+            }
             append("请根据下面的完整对话继续回复最后一条用户消息。\n\n")
             usable.forEach { message ->
                 val role = when (message.role) {
                     "system" -> "系统"
                     "assistant" -> "助手"
+                    "tool" -> "工具结果"
                     else -> "用户"
                 }
-                append(role).append("：").append(message.content).append("\n\n")
+                append(role)
+                message.name?.let { append("[").append(it).append("]") }
+                message.toolCallId?.let { append("(call_id=").append(it).append(")") }
+                append("：").append(message.content).append("\n\n")
             }
         }.trimEnd()
     }

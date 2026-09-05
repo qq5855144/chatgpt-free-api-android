@@ -18,6 +18,7 @@
 | 保存 Cookie / Access Token / Session Token | Android Keystore 派生密钥 + EncryptedSharedPreferences 加密存储 |
 | 逆向调用网页私有接口 | 直连 `chatgpt.com/backend-api/conversation`（SSE 流式协议逆向） |
 | 网页免费额度 → API | 本地 NanoHTTPD 服务把网页会话翻译为 OpenAI 兼容接口 |
+| MCP / Function Calling | 兼容 `tools`、`tool_choice`、`tool_calls` 与 `role=tool`，由 AI 客户端执行已连接的 MCP 工具 |
 | App 内直接聊天 | 内置聊天 Tab，流式输出，多轮对话 |
 | 免费用官方免费模型 | 默认 gpt-5 系列（gpt-5-6/gpt-5-5/mini 等），可自动拉取账号真实可用模型列表 |
 | 令牌过期自动续期 | 401/403 时用 Session Token 调 `/api/auth/session` 换取新 AccessToken |

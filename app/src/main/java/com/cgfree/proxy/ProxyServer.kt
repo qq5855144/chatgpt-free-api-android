@@ -6,6 +6,7 @@ import com.cgfree.data.ConversationRequest
 import com.cgfree.data.ModelConst
 import com.cgfree.data.Prefs
 import com.cgfree.data.TokenStore
+import com.cgfree.data.ToolSpec
 import com.cgfree.net.ChatGPTClient
 import com.cgfree.net.WebViewChatEngine
 import com.cgfree.util.LogBuffer
@@ -13,6 +14,7 @@ import fi.iki.elonen.NanoHTTPD
 import okhttp3.OkHttpClient
 import org.json.JSONArray
 import org.json.JSONObject
+import org.json.JSONTokener
 import java.io.ByteArrayOutputStream
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
@@ -39,6 +41,8 @@ class ProxyServer(
     lan: Boolean,
     private val client: OkHttpClient = ChatGPTClient.newClient()
 ) : NanoHTTPD(if (lan) null else "127.0.0.1", port) {
+
+    private data class ParsedToolCall(val id: String, val name: String, val arguments: String)
 
     companion object {
         private var modelsCache: Pair<Long, List<String>>? = null
@@ -164,6 +168,8 @@ class ProxyServer(
         val stream = body.optBoolean("stream", false)
         val convId = body.optString("conversation_id", "").takeIf { it.isNotBlank() }
         val historyDisabled = body.optBoolean("history_and_training_disabled", true)
+        val toolChoice = parseToolChoice(body.opt("tool_choice"))
+        val tools = if (toolChoice == "none") emptyList() else parseTools(body)
 
         val msgsArr = body.optJSONArray("messages")
             ?: return jsonError(400, "缺少 messages 字段")
@@ -182,7 +188,11 @@ class ProxyServer(
         for (i in 0 until msgsArr.length()) {
             val m = msgsArr.optJSONObject(i) ?: continue
             val role = m.optString("role", "user").lowercase()
-            val content = extractText(m.opt("content")) ?: continue
+            var content = extractText(m.opt("content"))
+            if (content.isNullOrBlank() && role == "assistant") {
+                content = assistantToolCallsForHistory(m.optJSONArray("tool_calls"))
+            }
+            if (content.isNullOrBlank()) continue
             if ('\uFFFD' in content) {
                 if (i == lastUserIndex) {
                     return jsonError(400, "当前用户消息已在聊天客户端内损坏（包含 �），请新建会话后重新输入")
@@ -190,7 +200,12 @@ class ProxyServer(
                 LogBuffer.log("已跳过含乱码的历史消息 index=$i role=$role chars=${content.length}")
                 continue
             }
-            chatMsgs.add(ChatMsg(role, content))
+            chatMsgs.add(ChatMsg(
+                role = role,
+                content = content,
+                name = m.optString("name", "").takeIf { it.isNotBlank() },
+                toolCallId = m.optString("tool_call_id", "").takeIf { it.isNotBlank() }
+            ))
         }
         if (chatMsgs.isEmpty()) return jsonError(400, "messages 中没有可用的文本内容")
 
@@ -198,10 +213,12 @@ class ProxyServer(
             model = model,
             messages = chatMsgs,
             conversationId = convId,
-            historyAndTrainingDisabled = historyDisabled
+            historyAndTrainingDisabled = historyDisabled,
+            tools = tools,
+            toolChoice = toolChoice
         )
 
-        LogBuffer.log("POST /v1/chat/completions model=$model stream=$stream msgs=${chatMsgs.size} roles=${chatMsgs.groupingBy { it.role }.eachCount()}")
+        LogBuffer.log("POST /v1/chat/completions model=$model stream=$stream msgs=${chatMsgs.size} tools=${tools.size} choice=${toolChoice ?: "auto"} roles=${chatMsgs.groupingBy { it.role }.eachCount()}")
 
         return if (stream) streamResponse(token, request) else syncResponse(token, request)
     }
@@ -334,6 +351,67 @@ class ProxyServer(
         else -> null
     }
 
+    /** 解析 OpenAI tools，同时兼容旧版 functions 字段。 */
+    private fun parseTools(body: JSONObject): List<ToolSpec> {
+        val result = ArrayList<ToolSpec>()
+        val tools = body.optJSONArray("tools")
+        if (tools != null) {
+            for (i in 0 until tools.length()) {
+                val item = tools.optJSONObject(i) ?: continue
+                if (item.optString("type", "function") != "function") continue
+                val fn = item.optJSONObject("function") ?: continue
+                toolSpec(fn)?.let { result.add(it) }
+            }
+        }
+        val functions = body.optJSONArray("functions")
+        if (functions != null) {
+            for (i in 0 until functions.length()) {
+                functions.optJSONObject(i)?.let { fn -> toolSpec(fn)?.let { result.add(it) } }
+            }
+        }
+        return result.distinctBy { it.name }
+    }
+
+    private fun toolSpec(fn: JSONObject): ToolSpec? {
+        val name = fn.optString("name", "").trim().takeIf { it.isNotEmpty() } ?: return null
+        val params = fn.opt("parameters")
+        return ToolSpec(
+            name = name,
+            description = fn.optString("description", "").trim(),
+            parametersJson = when (params) {
+                is JSONObject, is JSONArray -> params.toString()
+                is String -> params.takeIf { it.isNotBlank() } ?: "{}"
+                else -> "{}"
+            }
+        )
+    }
+
+    private fun parseToolChoice(value: Any?): String? = when (value) {
+        is String -> value.lowercase()
+        is JSONObject -> value.optJSONObject("function")
+            ?.optString("name", "")
+            ?.takeIf { it.isNotBlank() }
+        else -> null
+    }
+
+    /** 保留上一轮 assistant.tool_calls，便于模型结合紧随其后的 role=tool 结果继续回答。 */
+    private fun assistantToolCallsForHistory(calls: JSONArray?): String? {
+        if (calls == null || calls.length() == 0) return null
+        return buildString {
+            append("已请求工具调用：")
+            var appended = false
+            for (i in 0 until calls.length()) {
+                val call = calls.optJSONObject(i) ?: continue
+                val fn = call.optJSONObject("function") ?: continue
+                if (appended) append("；")
+                append(fn.optString("name", "unknown"))
+                append('(').append(fn.optString("arguments", "{}")).append(')')
+                call.optString("id", "").takeIf { it.isNotBlank() }?.let { append(" id=").append(it) }
+                appended = true
+            }
+        }.takeIf { it != "已请求工具调用：" }
+    }
+
     // ---------- SSE 流式响应 ----------
 
     /**
@@ -381,6 +459,8 @@ class ProxyServer(
         val id = "chatcmpl-" + UUID.randomUUID().toString().replace("-", "")
         val created = System.currentTimeMillis() / 1000
         val acc = com.cgfree.util.TextAccumulator()
+        val toolBuffer = StringBuilder()
+        val toolMode = request.tools.isNotEmpty()
         val t0 = System.currentTimeMillis()
 
         // Piped 管道：生产者线程写 OpenAI SSE 块，NanoHTTPD newChunkedResponse 流式发送。
@@ -406,12 +486,14 @@ class ProxyServer(
                     when (ev) {
                         is ChatGPTClient.Event.Delta -> {
                             acc.push(ev.text) { delta ->
-                                writeSse(sseChunk(id, created, request.model, content = delta))
+                                if (toolMode) toolBuffer.append(delta)
+                                else writeSse(sseChunk(id, created, request.model, content = delta))
                             }
                         }
                         is ChatGPTClient.Event.Final -> {
                             acc.push(ev.text) { delta ->
-                                writeSse(sseChunk(id, created, request.model, content = delta))
+                                if (toolMode) toolBuffer.append(delta)
+                                else writeSse(sseChunk(id, created, request.model, content = delta))
                             }
                         }
                         is ChatGPTClient.Event.ConvId -> { /* 忽略 */ }
@@ -425,7 +507,21 @@ class ProxyServer(
                 }
                 // WebView 指纹通道优先，引擎不可用时内部回退 OkHttp
                 upstreamConversation(token, request, handle)
-                if (!terminalError) writeSse(sseFinishChunk(id, created, request.model))
+                if (!terminalError && toolMode) {
+                    val calls = parseToolCalls(toolBuffer.toString(), request.tools)
+                    if (calls.isNotEmpty()) {
+                        writeSse(sseToolCallsChunk(id, created, request.model, calls))
+                        writeSse(sseFinishChunk(id, created, request.model, "tool_calls"))
+                        LogBuffer.log("stream 返回 tool_calls=${calls.map { it.name }}")
+                    } else {
+                        if (toolBuffer.isNotEmpty()) {
+                            writeSse(sseChunk(id, created, request.model, content = toolBuffer.toString()))
+                        }
+                        writeSse(sseFinishChunk(id, created, request.model, "stop"))
+                    }
+                } else if (!terminalError) {
+                    writeSse(sseFinishChunk(id, created, request.model, "stop"))
+                }
                 writeSse("data: [DONE]\n\n")
                 LogBuffer.log("stream 完成 model=${request.model} 耗时 ${(System.currentTimeMillis() - t0) / 1000}s")
             } catch (e: Exception) {
@@ -510,7 +606,8 @@ class ProxyServer(
                 .put("type", "upstream_empty_response"))
             return json(502, j)
         }
-        LogBuffer.log("sync 完成 model=${request.model} 字符=${text.length} 耗时 ${(System.currentTimeMillis() - t0) / 1000}s")
+        val toolCalls = parseToolCalls(text, request.tools)
+        LogBuffer.log("sync 完成 model=${request.model} 字符=${text.length} toolCalls=${toolCalls.size} 耗时 ${(System.currentTimeMillis() - t0) / 1000}s")
         val pTokens = estimateTokens(chatChars(request.messages))
         val cTokens = estimateTokens(text.length)
         val j = JSONObject()
@@ -518,12 +615,17 @@ class ProxyServer(
         j.put("object", "chat.completion")
         j.put("created", created)
         j.put("model", request.model)
+        val message = JSONObject().put("role", "assistant")
+        if (toolCalls.isNotEmpty()) {
+            message.put("content", JSONObject.NULL)
+            message.put("tool_calls", toolCallsJson(toolCalls))
+        } else {
+            message.put("content", text)
+        }
         j.put("choices", JSONArray().put(JSONObject()
             .put("index", 0)
-            .put("message", JSONObject()
-                .put("role", "assistant")
-                .put("content", text))
-            .put("finish_reason", "stop")))
+            .put("message", message)
+            .put("finish_reason", if (toolCalls.isNotEmpty()) "tool_calls" else "stop")))
         j.put("usage", JSONObject()
             .put("prompt_tokens", pTokens)
             .put("completion_tokens", cTokens)
@@ -534,6 +636,58 @@ class ProxyServer(
     private fun chatChars(msgs: List<ChatMsg>): Int = msgs.sumOf { it.content.length }
 
     private fun estimateTokens(chars: Int): Int = (chars / 4).coerceAtLeast(1)
+
+    /**
+     * 网页模型不能直接接收 OpenAI tools，promptText 会要求其输出受限的 tool_calls JSON。
+     * 这里只接受请求中真实存在的工具名，避免普通 JSON 回答或幻觉被误当成工具调用。
+     */
+    private fun parseToolCalls(text: String, tools: List<ToolSpec>): List<ParsedToolCall> {
+        if (tools.isEmpty() || text.isBlank()) return emptyList()
+        val tagged = Regex("<tool_calls?>\\s*(.*?)\\s*</tool_calls?>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+            .find(text)
+            ?.groupValues
+            ?.getOrNull(1)
+        val candidate = tagged ?: run {
+            val trimmed = text.trim().removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
+            if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return emptyList()
+            trimmed
+        }
+        val root = runCatching { JSONTokener(candidate).nextValue() }.getOrNull() ?: return emptyList()
+        val array = when (root) {
+            is JSONArray -> root
+            is JSONObject -> root.optJSONArray("tool_calls") ?: JSONArray().put(root)
+            else -> return emptyList()
+        }
+        val allowed = tools.map { it.name }.toSet()
+        val result = ArrayList<ParsedToolCall>()
+        for (i in 0 until array.length()) {
+            val item = array.optJSONObject(i) ?: continue
+            val fn = item.optJSONObject("function") ?: item
+            val name = fn.optString("name", "").trim()
+            if (name !in allowed) continue
+            val rawArgs = fn.opt("arguments")
+            val args = when (rawArgs) {
+                is JSONObject, is JSONArray -> rawArgs.toString()
+                is String -> rawArgs.takeIf { it.isNotBlank() } ?: "{}"
+                else -> "{}"
+            }
+            val id = item.optString("id", "").takeIf { it.isNotBlank() }
+                ?: "call_${UUID.randomUUID().toString().replace("-", "").take(24)}"
+            result.add(ParsedToolCall(id, name, args))
+        }
+        return result
+    }
+
+    private fun toolCallsJson(calls: List<ParsedToolCall>): JSONArray = JSONArray().apply {
+        calls.forEach { call ->
+            put(JSONObject()
+                .put("id", call.id)
+                .put("type", "function")
+                .put("function", JSONObject()
+                    .put("name", call.name)
+                    .put("arguments", call.arguments)))
+        }
+    }
 
     // ---------- SSE 组装 ----------
 
@@ -568,7 +722,36 @@ class ProxyServer(
         return "data: $j\n\n"
     }
 
-    private fun sseFinishChunk(id: String, created: Long, model: String): String {
+    private fun sseToolCallsChunk(
+        id: String,
+        created: Long,
+        model: String,
+        calls: List<ParsedToolCall>
+    ): String {
+        val delta = JSONObject().put("tool_calls", JSONArray().apply {
+            calls.forEachIndexed { index, call ->
+                put(JSONObject()
+                    .put("index", index)
+                    .put("id", call.id)
+                    .put("type", "function")
+                    .put("function", JSONObject()
+                        .put("name", call.name)
+                        .put("arguments", call.arguments)))
+            }
+        })
+        val j = JSONObject()
+            .put("id", id)
+            .put("object", "chat.completion.chunk")
+            .put("created", created)
+            .put("model", model)
+            .put("choices", JSONArray().put(JSONObject()
+                .put("index", 0)
+                .put("delta", delta)
+                .put("finish_reason", JSONObject.NULL)))
+        return "data: $j\n\n"
+    }
+
+    private fun sseFinishChunk(id: String, created: Long, model: String, reason: String): String {
         val j = JSONObject()
             .put("id", id)
             .put("object", "chat.completion.chunk")
@@ -577,7 +760,7 @@ class ProxyServer(
             .put("choices", JSONArray().put(JSONObject()
                 .put("index", 0)
                 .put("delta", JSONObject())
-                .put("finish_reason", "stop")))
+                .put("finish_reason", reason)))
         return "data: $j\n\n"
     }
 
